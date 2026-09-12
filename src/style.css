@@ -1,0 +1,107 @@
+:root {
+  color-scheme: dark;
+  font-family:
+    'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system,
+    sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #0f141b;
+  color: #dbe4ee;
+}
+
+.page {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+}
+
+h1 {
+  font-size: 22px;
+  margin: 0 0 8px;
+}
+
+h2 {
+  font-size: 16px;
+  margin: 24px 0 8px;
+}
+
+.hint {
+  color: #8fa1b6;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.drop-zone {
+  border: 2px dashed #3b82f6;
+  border-radius: 12px;
+  padding: 40px 24px;
+  text-align: center;
+  cursor: pointer;
+  background: #131b26;
+  margin: 20px 0;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.drop-zone.over {
+  background: #1b2a40;
+  border-color: #60a5fa;
+}
+
+.drop-zone p {
+  margin: 0;
+}
+
+.error {
+  border: 1px solid #ef4444;
+  background: #2a1518;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin: 16px 0;
+}
+
+.error h2 {
+  margin: 0 0 8px;
+  color: #fca5a5;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0 16px;
+  font-size: 14px;
+}
+
+th,
+td {
+  border: 1px solid #2a3646;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+th {
+  background: #1a2432;
+  white-space: nowrap;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+#download {
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  padding: 10px 22px;
+  border-radius: 8px;
+  font-size: 15px;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+#download:hover {
+  background: #1d4ed8;
+}
