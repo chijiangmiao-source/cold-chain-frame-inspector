@@ -205,6 +205,54 @@ function fail(frames: ParsedFrame[], error: ParseError): ParseResult {
   return { frames, error };
 }
 
+export interface SequenceGap {
+  /** 断点前一帧的帧号 */
+  prevIndex: number;
+  /** 断点后一帧的帧号 */
+  nextIndex: number;
+  /** 前一帧的序号 */
+  prevSequence: number;
+  /** 后一帧的实际序号 */
+  nextSequence: number;
+  /** 期望序号：(prevSequence + 1) % 256 */
+  expectedSequence: number;
+  /** 后一帧首字节在文件中的绝对偏移 */
+  nextOffset: number;
+}
+
+export interface ContinuityResult {
+  /** true 表示全部相邻帧在 0-255 循环序号下连续（未发现断点） */
+  continuous: boolean;
+  /** 按文件顺序记录的断点明细 */
+  gaps: SequenceGap[];
+}
+
+/**
+ * 对完全合法文件的帧按文件顺序做 0-255 循环序号连续性检查。
+ * 首帧不参与比较；255 -> 0 视为连续；空文件与单帧文件按无断点处理。
+ * 仅在整文件解析成功（error === null）后调用，已保留的前置帧不得
+ * 当作完整批次结论。
+ */
+export function checkSequenceContinuity(frames: ParsedFrame[]): ContinuityResult {
+  const gaps: SequenceGap[] = [];
+  for (let i = 1; i < frames.length; i++) {
+    const prev = frames[i - 1];
+    const next = frames[i];
+    const expectedSequence = (prev.sequence + 1) % 256;
+    if (next.sequence !== expectedSequence) {
+      gaps.push({
+        prevIndex: prev.index,
+        nextIndex: next.index,
+        prevSequence: prev.sequence,
+        nextSequence: next.sequence,
+        expectedSequence,
+        nextOffset: next.offset,
+      });
+    }
+  }
+  return { continuous: gaps.length === 0, gaps };
+}
+
 export interface FrameReport {
   index: number;
   offset: number;
@@ -223,6 +271,8 @@ export interface FileReport {
   fileName: string;
   fileSize: number;
   frameCount: number;
+  /** 连续性摘要与断点明细，与页面展示一致 */
+  continuity: ContinuityResult;
   frames: FrameReport[];
 }
 
@@ -236,6 +286,7 @@ export function buildReport(
     fileName,
     fileSize,
     frameCount: frames.length,
+    continuity: checkSequenceContinuity(frames),
     frames: frames.map((f) => ({
       index: f.index,
       offset: f.offset,

@@ -2,7 +2,9 @@
 import { computed, ref } from 'vue';
 import {
   buildReport,
+  checkSequenceContinuity,
   parseFrames,
+  type ContinuityResult,
   type ErrorField,
   type FieldName,
   type ParseResult,
@@ -36,6 +38,19 @@ const error = computed(() => result.value?.error ?? null);
 const frames = computed(() => result.value?.frames ?? []);
 /** 完全合法（无任何错误）才允许下载 */
 const canDownload = computed(() => result.value !== null && result.value.error === null);
+/**
+ * 仅在整文件解析成功后执行连续性检查；文件不合格时为 null，
+ * 页面据此显示"未执行"，不会把已保留的前置帧误报为完整批次结论。
+ */
+const continuity = computed<ContinuityResult | null>(() => {
+  const r = result.value;
+  if (!r || r.error !== null) return null;
+  return checkSequenceContinuity(r.frames);
+});
+/** 作为断点后帧的帧号集合，用于在帧表中标记 */
+const gapAfterIndexes = computed(
+  () => new Set((continuity.value?.gaps ?? []).map((g) => g.nextIndex)),
+);
 
 async function handleFile(file: File): Promise<void> {
   // 纯浏览器内读取，不上传、不访问任何外部服务
@@ -120,6 +135,46 @@ function downloadJson(): void {
       <p v-else>第一个帧即损坏，没有可保留的合法帧。</p>
     </section>
 
+    <section v-if="result" id="continuity" class="continuity">
+      <h2>序号连续性（0-255 循环）</h2>
+      <p v-if="error" data-testid="continuity-skipped" class="continuity-skipped">
+        文件不合格，未执行连续性检查：解析已在首个非法字节停止，
+        已保留的帧仅为文件前缀，不能据此得出完整批次结论。
+      </p>
+      <template v-else-if="continuity">
+        <p v-if="continuity.continuous" data-testid="continuity-ok" class="continuity-ok">
+          未发现断点：全部相邻帧序号在 0-255 循环下连续（255 → 0 视为连续）。
+        </p>
+        <template v-else>
+          <p data-testid="continuity-gaps" class="continuity-gaps">
+            存在断点：共 {{ continuity.gaps.length }} 处，帧表中已标记对应后帧。
+          </p>
+          <table id="gaps">
+            <thead>
+              <tr>
+                <th>前帧 #</th>
+                <th>后帧 #</th>
+                <th>前帧序号</th>
+                <th>后帧序号</th>
+                <th>期望序号</th>
+                <th>后帧字节偏移</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="g in continuity.gaps" :key="g.nextIndex">
+                <td>{{ g.prevIndex }}</td>
+                <td>{{ g.nextIndex }}</td>
+                <td>{{ g.prevSequence }}</td>
+                <td>{{ g.nextSequence }}</td>
+                <td>{{ g.expectedSequence }}</td>
+                <td>{{ g.nextOffset }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+      </template>
+    </section>
+
     <template v-if="result && frames.length">
       <section>
         <h2>帧概览（{{ frames.length }} 帧）</h2>
@@ -140,8 +195,20 @@ function downloadJson(): void {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="f in frames" :key="f.index">
-              <td>{{ f.index }}</td>
+            <tr
+              v-for="f in frames"
+              :key="f.index"
+              :class="{ 'gap-after': gapAfterIndexes.has(f.index) }"
+            >
+              <td>
+                {{ f.index }}
+                <span
+                  v-if="gapAfterIndexes.has(f.index)"
+                  data-testid="gap-flag"
+                  class="gap-flag"
+                  >断点后帧</span
+                >
+              </td>
               <td>{{ f.offset }}</td>
               <td class="mono">{{ f.magic }}</td>
               <td>{{ f.version }}</td>

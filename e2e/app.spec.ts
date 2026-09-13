@@ -183,3 +183,147 @@ test('下载的 JSON 与表格一致', async ({ page }) => {
   expect(report.frames[0].fields.map((f) => f.offset)).toEqual([0, 2, 3, 4, 8, 10, 11]);
   expect(report.frames[1].fields.map((f) => f.offset)).toEqual([12, 14, 15, 16, 20, 22, 23]);
 });
+
+test('连续文件显示未发现断点，255 -> 0 回绕视为连续', async ({ page }) => {
+  await dropFile(page, 'wrap.bin', [
+    ...makeFrame({ seq: 254 }),
+    ...makeFrame({ seq: 255 }),
+    ...makeFrame({ seq: 0 }),
+    ...makeFrame({ seq: 1 }),
+  ]);
+
+  await expect(page.getByTestId('continuity-ok')).toHaveText(/未发现断点/);
+  await expect(page.getByTestId('continuity-gaps')).toHaveCount(0);
+  await expect(page.locator('#gaps')).toHaveCount(0);
+  await expect(page.locator('#frames tbody tr.gap-after')).toHaveCount(0);
+  await expect(page.locator('#download')).toBeVisible();
+});
+
+test('含断点文件：列出断点证据、标记后帧，下载 JSON 含一致摘要', async ({ page }) => {
+  await dropFile(page, 'gap.bin', [
+    ...makeFrame({ seq: 10 }),
+    ...makeFrame({ seq: 11 }),
+    ...makeFrame({ seq: 20 }), // 跳号断点，后帧为第 2 帧
+    ...makeFrame({ seq: 20 }), // 重复号断点，后帧为第 3 帧
+  ]);
+
+  // 结论与断点明细
+  await expect(page.getByTestId('continuity-gaps')).toHaveText(/存在断点：共 2 处/);
+  await expect(page.getByTestId('continuity-ok')).toHaveCount(0);
+  const gapRows = page.locator('#gaps tbody tr');
+  await expect(gapRows).toHaveCount(2);
+  // 第一处：前帧 1（序号 11）-> 后帧 2（序号 20），期望 12，后帧偏移 24
+  const cells1 = gapRows.nth(0).locator('td');
+  await expect(cells1.nth(0)).toHaveText('1');
+  await expect(cells1.nth(1)).toHaveText('2');
+  await expect(cells1.nth(2)).toHaveText('11');
+  await expect(cells1.nth(3)).toHaveText('20');
+  await expect(cells1.nth(4)).toHaveText('12');
+  await expect(cells1.nth(5)).toHaveText('24');
+  // 第二处：前帧 2（序号 20）-> 后帧 3（序号 20），期望 21，后帧偏移 36
+  const cells2 = gapRows.nth(1).locator('td');
+  await expect(cells2.nth(0)).toHaveText('2');
+  await expect(cells2.nth(1)).toHaveText('3');
+  await expect(cells2.nth(2)).toHaveText('20');
+  await expect(cells2.nth(3)).toHaveText('20');
+  await expect(cells2.nth(4)).toHaveText('21');
+  await expect(cells2.nth(5)).toHaveText('36');
+
+  // 帧表中标记对应后帧（第 2、3 帧），其余帧不标记
+  const marked = page.locator('#frames tbody tr.gap-after');
+  await expect(marked).toHaveCount(2);
+  await expect(page.getByTestId('gap-flag')).toHaveCount(2);
+  await expect(marked.nth(0)).toContainText('断点后帧');
+  await expect(marked.nth(0).locator('td').nth(0)).toContainText('2');
+  await expect(marked.nth(1).locator('td').nth(0)).toContainText('3');
+
+  // 合法帧全部可见且仍可下载
+  await expect(page.locator('#frames tbody tr')).toHaveCount(4);
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.locator('#download').click(),
+  ]);
+  const path = await download.path();
+  const report = JSON.parse(readFileSync(path!, 'utf8')) as {
+    continuity: {
+      continuous: boolean;
+      gaps: Array<{
+        prevIndex: number;
+        nextIndex: number;
+        prevSequence: number;
+        nextSequence: number;
+        expectedSequence: number;
+        nextOffset: number;
+      }>;
+    };
+  };
+  // 报告中的连续性摘要及断点明细与页面一致
+  expect(report.continuity.continuous).toBe(false);
+  expect(report.continuity.gaps).toEqual([
+    {
+      prevIndex: 1,
+      nextIndex: 2,
+      prevSequence: 11,
+      nextSequence: 20,
+      expectedSequence: 12,
+      nextOffset: 24,
+    },
+    {
+      prevIndex: 2,
+      nextIndex: 3,
+      prevSequence: 20,
+      nextSequence: 20,
+      expectedSequence: 21,
+      nextOffset: 36,
+    },
+  ]);
+});
+
+test('换文件后连续性结论完全替换', async ({ page }) => {
+  await dropFile(page, 'gap.bin', [
+    ...makeFrame({ seq: 1 }),
+    ...makeFrame({ seq: 5 }),
+  ]);
+  await expect(page.getByTestId('continuity-gaps')).toHaveText(/存在断点：共 1 处/);
+  await expect(page.locator('#frames tbody tr.gap-after')).toHaveCount(1);
+
+  await dropFile(page, 'ok.bin', [
+    ...makeFrame({ seq: 3 }),
+    ...makeFrame({ seq: 4 }),
+    ...makeFrame({ seq: 5 }),
+  ]);
+  await expect(page.getByTestId('continuity-ok')).toHaveText(/未发现断点/);
+  await expect(page.getByTestId('continuity-gaps')).toHaveCount(0);
+  await expect(page.locator('#gaps')).toHaveCount(0);
+  await expect(page.locator('#frames tbody tr.gap-after')).toHaveCount(0);
+  await expect(page.getByTestId('gap-flag')).toHaveCount(0);
+  await expect(page.locator('#frames tbody tr')).toHaveCount(3);
+
+  // 再换回断点文件，结论再次完整替换
+  await dropFile(page, 'gap2.bin', [
+    ...makeFrame({ seq: 0 }),
+    ...makeFrame({ seq: 2 }),
+  ]);
+  await expect(page.getByTestId('continuity-gaps')).toHaveText(/存在断点：共 1 处/);
+  await expect(page.getByTestId('continuity-ok')).toHaveCount(0);
+  await expect(page.locator('#gaps tbody tr')).toHaveCount(1);
+  await expect(page.locator('#frames tbody tr.gap-after')).toHaveCount(1);
+});
+
+test('坏文件：连续性区域显示未执行，保留帧不被误报为完整批次', async ({ page }) => {
+  await dropFile(page, 'bad.bin', [
+    ...makeFrame({ seq: 1 }),
+    ...makeFrame({ seq: 3 }), // 前置帧本身序号不连续，但文件不合格时不做判断
+    ...makeFrame({ magic: [0x00, 0x00], seq: 4 }),
+  ]);
+
+  await expect(page.getByRole('alert')).toBeVisible();
+  await expect(page.getByTestId('continuity-skipped')).toHaveText(/文件不合格，未执行/);
+  await expect(page.getByTestId('continuity-ok')).toHaveCount(0);
+  await expect(page.getByTestId('continuity-gaps')).toHaveCount(0);
+  await expect(page.locator('#gaps')).toHaveCount(0);
+  // 保留的前置帧仍在，但不带任何断点标记
+  await expect(page.locator('#frames tbody tr')).toHaveCount(2);
+  await expect(page.locator('#frames tbody tr.gap-after')).toHaveCount(0);
+  await expect(page.locator('#download')).toHaveCount(0);
+});

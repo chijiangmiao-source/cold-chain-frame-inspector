@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildReport,
+  checkSequenceContinuity,
   formatTemperature,
   FRAME_SIZE,
   parseFrames,
@@ -246,6 +247,143 @@ describe('错误偏移定位', () => {
     const frame = makeFrame({ humidity: 200 });
     const r = parseFrames(new Uint8Array([...frame, 0x00]));
     expect(r.error).toMatchObject({ frameIndex: 0, offset: 10, field: 'humidity' });
+  });
+});
+
+describe('序号连续性', () => {
+  function continuityOf(...seqs: number[]) {
+    const r = parseFrames(bytes(...seqs.map((seq) => makeFrame({ seq }))));
+    expect(r.error).toBeNull();
+    return checkSequenceContinuity(r.frames);
+  }
+
+  it('正常递增：未发现断点', () => {
+    const c = continuityOf(0, 1, 2, 3, 4);
+    expect(c.continuous).toBe(true);
+    expect(c.gaps).toEqual([]);
+  });
+
+  it('首帧不参与比较：任意起始序号都算连续', () => {
+    const c = continuityOf(137, 138, 139);
+    expect(c.continuous).toBe(true);
+    expect(c.gaps).toEqual([]);
+  });
+
+  it('255 -> 0 回绕视为连续', () => {
+    const c = continuityOf(253, 254, 255, 0, 1);
+    expect(c.continuous).toBe(true);
+    expect(c.gaps).toEqual([]);
+  });
+
+  it('空文件与单帧文件按无断点处理', () => {
+    expect(continuityOf()).toEqual({ continuous: true, gaps: [] });
+    expect(continuityOf(200)).toEqual({ continuous: true, gaps: [] });
+  });
+
+  it('跳号：记录前后帧号、两侧序号、期望序号与后帧字节偏移', () => {
+    const c = continuityOf(1, 2, 5);
+    expect(c.continuous).toBe(false);
+    expect(c.gaps).toEqual([
+      {
+        prevIndex: 1,
+        nextIndex: 2,
+        prevSequence: 2,
+        nextSequence: 5,
+        expectedSequence: 3,
+        nextOffset: 2 * FRAME_SIZE,
+      },
+    ]);
+  });
+
+  it('重复序号视为断点，期望序号为前帧序号 + 1', () => {
+    const c = continuityOf(7, 7);
+    expect(c.continuous).toBe(false);
+    expect(c.gaps).toEqual([
+      {
+        prevIndex: 0,
+        nextIndex: 1,
+        prevSequence: 7,
+        nextSequence: 7,
+        expectedSequence: 8,
+        nextOffset: FRAME_SIZE,
+      },
+    ]);
+  });
+
+  it('255 之后期望 0，直接跳到 1 也算断点', () => {
+    const c = continuityOf(255, 1);
+    expect(c.continuous).toBe(false);
+    expect(c.gaps).toEqual([
+      {
+        prevIndex: 0,
+        nextIndex: 1,
+        prevSequence: 255,
+        nextSequence: 1,
+        expectedSequence: 0,
+        nextOffset: FRAME_SIZE,
+      },
+    ]);
+  });
+
+  it('多处断点按文件顺序全部记录', () => {
+    const c = continuityOf(0, 1, 4, 5, 5, 6, 9);
+    expect(c.continuous).toBe(false);
+    expect(c.gaps).toEqual([
+      {
+        prevIndex: 1,
+        nextIndex: 2,
+        prevSequence: 1,
+        nextSequence: 4,
+        expectedSequence: 2,
+        nextOffset: 2 * FRAME_SIZE,
+      },
+      {
+        prevIndex: 3,
+        nextIndex: 4,
+        prevSequence: 5,
+        nextSequence: 5,
+        expectedSequence: 6,
+        nextOffset: 4 * FRAME_SIZE,
+      },
+      {
+        prevIndex: 5,
+        nextIndex: 6,
+        prevSequence: 6,
+        nextSequence: 9,
+        expectedSequence: 7,
+        nextOffset: 6 * FRAME_SIZE,
+      },
+    ]);
+  });
+
+  it('下载报告中的连续性摘要与断点明细和检查函数一致', () => {
+    const data = bytes(
+      makeFrame({ seq: 10 }),
+      makeFrame({ seq: 11 }),
+      makeFrame({ seq: 20 }),
+    );
+    const r = parseFrames(data);
+    expect(r.error).toBeNull();
+    const report = buildReport('gap.bin', data.length, r.frames);
+    expect(report.continuity).toEqual(checkSequenceContinuity(r.frames));
+    expect(report.continuity.continuous).toBe(false);
+    expect(report.continuity.gaps).toEqual([
+      {
+        prevIndex: 1,
+        nextIndex: 2,
+        prevSequence: 11,
+        nextSequence: 20,
+        expectedSequence: 12,
+        nextOffset: 24,
+      },
+    ]);
+  });
+
+  it('连续文件的报告摘要为无断点', () => {
+    const data = bytes(makeFrame({ seq: 255 }), makeFrame({ seq: 0 }));
+    const r = parseFrames(data);
+    const report = buildReport('ok.bin', data.length, r.frames);
+    expect(report.continuity).toEqual({ continuous: true, gaps: [] });
   });
 });
 

@@ -91,6 +91,50 @@ th {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+.continuity {
+  border: 1px solid #2a3646;
+  background: #131b26;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin: 16px 0;
+}
+
+.continuity h2 {
+  margin: 0 0 8px;
+}
+
+.continuity p {
+  margin: 0 0 8px;
+}
+
+.continuity-ok {
+  color: #4ade80;
+}
+
+.continuity-gaps {
+  color: #fbbf24;
+}
+
+.continuity-skipped {
+  color: #8fa1b6;
+}
+
+tr.gap-after td {
+  background: #2a2118;
+  border-top: 2px solid #f59e0b;
+}
+
+.gap-flag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #f59e0b;
+  color: #1a1206;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 #download {
   background: #2563eb;
   color: #fff;
