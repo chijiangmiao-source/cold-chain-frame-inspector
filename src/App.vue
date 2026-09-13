@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, shallowRef } from 'vue';
 import {
   buildReport,
   calibratedTemperatureC,
@@ -17,6 +17,12 @@ import {
   type ParseResult,
   type ParsedFrame,
 } from './parser';
+import {
+  createReplaySession,
+  type ReplayFrameSnapshot,
+  type ReplaySession,
+  type ReplayStatus,
+} from './replay';
 
 const ERROR_FIELD_LABELS: Record<ErrorField, string> = {
   length: '帧长度',
@@ -127,10 +133,105 @@ function selectSegment(id: string): void {
   });
 }
 
+// ---------- 批次复盘（逐帧回放） ----------
+
+const REPLAY_STATUS_LABELS: Record<ReplayStatus, string> = {
+  idle: '待播放',
+  playing: '播放中',
+  paused: '已暂停',
+  ended: '已结束',
+};
+
+/**
+ * 当前批次的复盘会话。换入新文件时旧会话立即销毁；仅当整文件合法
+ * 且至少有一帧时按新帧重建。会话对象本身不深度响应化，面板展示的
+ * 状态 / 当前帧由下面的镜像 ref 通过 onChange 同步。
+ */
+const replaySession = shallowRef<ReplaySession | null>(null);
+const replayStatus = ref<ReplayStatus>('idle');
+const replayIndex = ref(0);
+const replayFrameCount = ref(0);
+const replayFrame = shallowRef<ReplayFrameSnapshot | null>(null);
+
+/**
+ * 无法复盘的原因：文件不合格（不利用已保留的合法帧前缀）或没有任何帧。
+ * 为 null 表示当前批次可以复盘。
+ */
+const replayUnavailableReason = computed(() => {
+  const r = result.value;
+  if (!r) return null;
+  if (r.error !== null) {
+    return '文件不合格，无法复盘：解析已在首个非法字节停止，'
+      + '已保留的合法帧仅为文件前缀，不能据此复盘完整批次。';
+  }
+  if (r.frames.length === 0) {
+    return '文件没有任何帧，无法复盘：复盘需要至少一个合法帧组成的完整批次。';
+  }
+  return null;
+});
+
+/** 当前帧的告警标志文本：多类告警并列，无告警显示"无" */
+const replayAlarmText = computed(() => {
+  const f = replayFrame.value;
+  if (!f) return '';
+  const names: string[] = [];
+  if (f.flags.highTemp) names.push('高温');
+  if (f.flags.lowTemp) names.push('低温');
+  if (f.flags.lowBattery) names.push('低电量');
+  return names.length > 0 ? names.join('、') : '无';
+});
+
+/** 销毁当前复盘会话并复位面板状态（换文件 / 读取失败时调用） */
+function teardownReplay(): void {
+  replaySession.value?.destroy();
+  replaySession.value = null;
+  replayStatus.value = 'idle';
+  replayIndex.value = 0;
+  replayFrameCount.value = 0;
+  replayFrame.value = null;
+}
+
+/**
+ * 按新解析结果重建复盘会话：旧会话立即销毁；仅当整文件合法且
+ * 至少有一帧时创建新会话，否则保持销毁状态，面板显示无法复盘的原因。
+ */
+function rebuildReplay(parsed: ParseResult): void {
+  teardownReplay();
+  if (parsed.error !== null || parsed.frames.length === 0) return;
+  const session = createReplaySession(parsed.frames, {
+    onChange: (s) => {
+      replayStatus.value = s.status;
+      replayIndex.value = s.currentIndex;
+      replayFrame.value = s.current();
+    },
+  });
+  replaySession.value = session;
+  replayStatus.value = session.status;
+  replayIndex.value = session.currentIndex;
+  replayFrameCount.value = session.frameCount;
+  replayFrame.value = session.current();
+}
+
+function replayPlay(): void {
+  replaySession.value?.play();
+}
+
+function replayPause(): void {
+  replaySession.value?.pause();
+}
+
+/** 拖动进度条：立即定位到任意帧 */
+function onReplaySeek(event: Event): void {
+  const target = event.target as HTMLInputElement;
+  replaySession.value?.seek(Number(target.value));
+}
+
 function frameRowClass(f: { index: number }): Record<string, boolean> {
   return {
     'gap-after': gapAfterIndexes.value.has(f.index),
     'alarm-highlight': highlightedFrameIndexes.value.has(f.index),
+    // 复盘会话存在时同步突出当前帧；坏文件的保留前缀不高亮
+    'replay-current': replaySession.value !== null && f.index === replayIndex.value,
   };
 }
 
@@ -188,6 +289,8 @@ async function handleFile(file: File): Promise<void> {
   result.value = null;
   // 更换文件即清除上一批次的片段定位与帧区间高亮
   selectedSegmentId.value = null;
+  // 换入新批次：旧复盘会话立即销毁，待新文件解析成功后按新帧重建
+  teardownReplay();
   // 校准偏移跨文件保留（继续使用当前偏移）；输入框重新同步为当前
   // 生效值——上一批次未应用的输入（含非法文本）不得残留到本批次，
   // 否则输入框会与当前生效偏移不一致；同时清除上一批次的输入校验反馈
@@ -199,7 +302,10 @@ async function handleFile(file: File): Promise<void> {
     // 纯浏览器内读取，不上传、不访问任何外部服务
     const buffer = await file.arrayBuffer();
     if (token !== readToken) return; // 已有更新的选择，丢弃过期结果
-    result.value = parseFrames(new Uint8Array(buffer));
+    const parsed = parseFrames(new Uint8Array(buffer));
+    result.value = parsed;
+    // 复盘会话按新帧重建（坏文件 / 空文件不重建，面板显示原因）
+    rebuildReplay(parsed);
   } catch {
     if (token !== readToken) return;
     // 读取失败：旧结果已在选择时清空，此处明确标记本次失败，
@@ -441,6 +547,69 @@ function downloadJson(): void {
             </tbody>
           </table>
         </template>
+      </template>
+    </section>
+
+    <section v-if="result" id="replay" class="replay">
+      <h2>批次复盘（逐帧回放）</h2>
+      <p v-if="replayUnavailableReason" data-testid="replay-unavailable" class="replay-skipped">
+        {{ replayUnavailableReason }}
+      </p>
+      <template v-else>
+        <p class="hint">
+          按记录顺序逐帧复盘当前合法批次：播放自动推进，暂停保持当前帧，
+          拖动进度可立即定位任意帧；抵达末帧后再次播放将从首帧重新开始。
+        </p>
+        <p>
+          状态：<strong data-testid="replay-status">{{ REPLAY_STATUS_LABELS[replayStatus] }}</strong>
+          · 位置：<span data-testid="replay-position">第 {{ replayIndex + 1 }} / {{ replayFrameCount }} 帧</span>
+        </p>
+        <div class="replay-controls">
+          <button
+            id="replay-play"
+            type="button"
+            :disabled="replayStatus === 'playing'"
+            @click="replayPlay"
+          >
+            播放
+          </button>
+          <button
+            id="replay-pause"
+            type="button"
+            :disabled="replayStatus !== 'playing'"
+            @click="replayPause"
+          >
+            暂停
+          </button>
+          <input
+            id="replay-progress"
+            type="range"
+            aria-label="复盘进度"
+            min="0"
+            :max="replayFrameCount - 1"
+            step="1"
+            :value="replayIndex"
+            @input="onReplaySeek"
+          />
+        </div>
+        <dl v-if="replayFrame" class="replay-frame">
+          <div>
+            <dt>温度</dt>
+            <dd data-testid="replay-temperature">{{ replayFrame.temperatureC }} °C</dd>
+          </div>
+          <div>
+            <dt>湿度</dt>
+            <dd data-testid="replay-humidity">{{ replayFrame.humidity }} %</dd>
+          </div>
+          <div>
+            <dt>序号</dt>
+            <dd data-testid="replay-sequence">{{ replayFrame.sequence }}</dd>
+          </div>
+          <div>
+            <dt>告警</dt>
+            <dd data-testid="replay-alarms">{{ replayAlarmText }}</dd>
+          </div>
+        </dl>
       </template>
     </section>
 
