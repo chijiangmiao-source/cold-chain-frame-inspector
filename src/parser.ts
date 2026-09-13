@@ -94,6 +94,108 @@ export function formatTemperature(raw: number): string {
   return (raw / 10).toFixed(1);
 }
 
+/**
+ * 温度校准偏移：以十分之一度（0.1 °C）整数表示与计算。
+ *
+ * 冷库探头定期校准后会产生统一温度偏移，巡检人员用当前校准值复核
+ * 合法批次。所有校准运算均为整数相加（原始值与偏移同为 0.1 °C
+ * 整数），避免 0.1 + 0.2 之类的浮点漂移。
+ */
+
+/** 校准偏移下限：-10.0 °C */
+export const CALIBRATION_MIN_TENTHS = -100;
+/** 校准偏移上限：+10.0 °C */
+export const CALIBRATION_MAX_TENTHS = 100;
+
+/**
+ * 校准后温度原始值 = 原始值 + 偏移（均为 0.1 °C 整数）。
+ * 纯整数相加，结果仍是精确的十分之一度整数。
+ */
+export function calibratedTemperatureRaw(
+  temperatureRaw: number,
+  offsetTenths: number,
+): number {
+  return temperatureRaw + offsetTenths;
+}
+
+/** 校准后摄氏度文本：整数相加后再格式化，固定一位小数 */
+export function calibratedTemperatureC(
+  temperatureRaw: number,
+  offsetTenths: number,
+): string {
+  return formatTemperature(calibratedTemperatureRaw(temperatureRaw, offsetTenths));
+}
+
+/**
+ * 偏移的摄氏度表示，固定一位小数并显式带符号：
+ * 15 -> "+1.5"，-100 -> "-10.0"，0 -> "0.0"。
+ */
+export function formatOffsetC(offsetTenths: number): string {
+  const abs = formatTemperature(Math.abs(offsetTenths));
+  if (offsetTenths > 0) return `+${abs}`;
+  if (offsetTenths < 0) return `-${abs}`;
+  return '0.0';
+}
+
+export type CalibrationInputError =
+  /** 无法解析为数字（含空输入） */
+  | 'not-a-number'
+  /** 小数位超过一位（校准按 0.1 °C 步进） */
+  | 'too-many-decimals'
+  /** 超出 -10.0 ~ +10.0 °C 范围 */
+  | 'out-of-range';
+
+export interface CalibrationInputResult {
+  /** true 表示输入合法，offsetTenths 有效 */
+  ok: boolean;
+  /** 解析成功时的偏移（0.1 °C 整数）；失败时为 null */
+  offsetTenths: number | null;
+  /** 失败原因；成功时为 null */
+  error: CalibrationInputError | null;
+  /** 面向用户的错误说明；成功时为 null */
+  message: string | null;
+}
+
+/**
+ * 解析校准偏移输入：允许整数或最多一位小数，范围 -10.0 ~ +10.0 °C。
+ *
+ * 解析全程按文本拆分符号 / 整数 / 小数位再合成十分之一度整数，
+ * 不经过浮点运算，"0.05" 之类输入按"小数位过多"拒绝而非四舍五入。
+ * 失败时调用方应保留上次有效结果。
+ */
+export function parseCalibrationInput(text: string): CalibrationInputResult {
+  const trimmed = text.trim();
+  const match = /^([+-]?)(\d+)(?:\.(\d+))?$/.exec(trimmed);
+  if (!match) {
+    return {
+      ok: false,
+      offsetTenths: null,
+      error: 'not-a-number',
+      message: `「${text}」不是有效数字：请输入 -10.0 至 +10.0 之间、最多一位小数的数值。`,
+    };
+  }
+  const [, sign, intPart, fracPart = ''] = match;
+  if (fracPart.length > 1) {
+    return {
+      ok: false,
+      offsetTenths: null,
+      error: 'too-many-decimals',
+      message: '小数位过多：校准偏移按 0.1 °C 步进，最多允许一位小数。',
+    };
+  }
+  const magnitude = Number(intPart) * 10 + (fracPart.length === 1 ? Number(fracPart) : 0);
+  const offsetTenths = sign === '-' ? -magnitude : magnitude;
+  if (offsetTenths < CALIBRATION_MIN_TENTHS || offsetTenths > CALIBRATION_MAX_TENTHS) {
+    return {
+      ok: false,
+      offsetTenths: null,
+      error: 'out-of-range',
+      message: '超出范围：校准偏移必须在 -10.0 至 +10.0 °C 之间。',
+    };
+  }
+  return { ok: true, offsetTenths, error: null, message: null };
+}
+
 export function parseFrames(data: Uint8Array): ParseResult {
   const frames: ParsedFrame[] = [];
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -265,6 +367,10 @@ export interface FrameReport {
   humidity: number;
   sequence: number;
   fields: FieldEntry[];
+  /** 校准后温度原始值（0.1 °C 整数），仅构建报告时传入校准参数才存在 */
+  calibratedTemperatureRaw?: number;
+  /** 校准后摄氏度（固定一位小数），仅构建报告时传入校准参数才存在 */
+  calibratedTemperatureC?: string;
 }
 
 /** 告警类型，与帧标志位一一对应：高温 / 低温 / 低电量 */
@@ -373,6 +479,16 @@ export function mergeAlarmSegments(frames: ParsedFrame[]): AlarmResult {
   return { summary, segments };
 }
 
+/** 报告中的校准说明：描述本次复核使用的统一温度偏移 */
+export interface CalibrationReport {
+  /** 温度偏移，0.1 °C 整数（如 15 表示 +1.5 °C） */
+  offsetTenths: number;
+  /** 偏移的摄氏度表示，固定一位小数并显式带符号，如 "+1.5"、"-10.0"、"0.0" */
+  offsetC: string;
+  /** 校准说明：校准温度的由来及其不影响既有结论的声明 */
+  note: string;
+}
+
 export interface FileReport {
   fileName: string;
   fileSize: number;
@@ -381,6 +497,8 @@ export interface FileReport {
   continuity: ContinuityResult;
   /** 告警摘要与片段明细，与页面展示一致（仅整文件合法时生成） */
   alarms: AlarmResult;
+  /** 校准说明：仅构建报告时传入校准参数才存在 */
+  calibration?: CalibrationReport;
   frames: FrameReport[];
 }
 
@@ -390,25 +508,47 @@ export function buildReport(
   fileSize: number,
   frames: ParsedFrame[],
   alarms: AlarmResult,
+  calibration?: { offsetTenths: number } | null,
 ): FileReport {
-  return {
+  const offsetTenths = calibration?.offsetTenths ?? null;
+  const report: FileReport = {
     fileName,
     fileSize,
     frameCount: frames.length,
     continuity: checkSequenceContinuity(frames),
     alarms,
-    frames: frames.map((f) => ({
-      index: f.index,
-      offset: f.offset,
-      magic: f.magic,
-      version: f.version,
-      flags: { ...f.flags },
-      timestamp: f.timestamp,
-      temperatureRaw: f.temperatureRaw,
-      temperatureC: f.temperatureC,
-      humidity: f.humidity,
-      sequence: f.sequence,
-      fields: f.fields.map((field) => ({ ...field })),
-    })),
+    frames: frames.map((f) => {
+      const frame: FrameReport = {
+        index: f.index,
+        offset: f.offset,
+        magic: f.magic,
+        version: f.version,
+        flags: { ...f.flags },
+        timestamp: f.timestamp,
+        temperatureRaw: f.temperatureRaw,
+        temperatureC: f.temperatureC,
+        humidity: f.humidity,
+        sequence: f.sequence,
+        fields: f.fields.map((field) => ({ ...field })),
+      };
+      if (offsetTenths !== null) {
+        // 逐帧校准温度：0.1 °C 整数相加，避免浮点漂移；原始字段原样保留
+        frame.calibratedTemperatureRaw = calibratedTemperatureRaw(
+          f.temperatureRaw,
+          offsetTenths,
+        );
+        frame.calibratedTemperatureC = formatTemperature(frame.calibratedTemperatureRaw);
+      }
+      return frame;
+    }),
   };
+  if (offsetTenths !== null) {
+    report.calibration = {
+      offsetTenths,
+      offsetC: formatOffsetC(offsetTenths),
+      note: '校准温度 = 原始温度 + 校准偏移，按 0.1 °C 整数相加以避免浮点漂移；'
+        + '原始字段、湿度、序号连续性与告警结论均基于原始数据，不受校准影响。',
+    };
+  }
+  return report;
 }

@@ -167,12 +167,13 @@ test('下载的 JSON 与表格一致', async ({ page }) => {
   expect(report.fileName).toBe('ok.bin');
   expect(report.frameCount).toBe(2);
 
-  // 与帧概览表格逐格一致
+  // 与帧概览表格逐格一致（原始温度与校准温度并列，零偏移时相同）
   const row1 = page.locator('#frames tbody tr').nth(1).locator('td');
   await expect(row1.nth(7)).toHaveText('1700000060');
   await expect(row1.nth(8)).toHaveText('-15.5');
-  await expect(row1.nth(9)).toHaveText('60');
-  await expect(row1.nth(10)).toHaveText('2');
+  await expect(row1.nth(9)).toHaveText('-15.5');
+  await expect(row1.nth(10)).toHaveText('60');
+  await expect(row1.nth(11)).toHaveText('2');
   expect(report.frames[1].timestamp).toBe(1_700_000_060);
   expect(report.frames[1].temperatureC).toBe('-15.5');
   expect(report.frames[1].humidity).toBe(60);

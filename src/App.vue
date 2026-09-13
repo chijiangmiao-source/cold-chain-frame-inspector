@@ -2,8 +2,12 @@
 import { computed, ref } from 'vue';
 import {
   buildReport,
+  calibratedTemperatureC,
   checkSequenceContinuity,
+  formatOffsetC,
+  formatTemperature,
   mergeAlarmSegments,
+  parseCalibrationInput,
   parseFrames,
   type AlarmResult,
   type AlarmType,
@@ -11,6 +15,7 @@ import {
   type ErrorField,
   type FieldName,
   type ParseResult,
+  type ParsedFrame,
 } from './parser';
 
 const ERROR_FIELD_LABELS: Record<ErrorField, string> = {
@@ -46,6 +51,21 @@ const reading = ref(false);
 const readError = ref<string | null>(null);
 const dragOver = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
+
+/**
+ * 当前生效的温度校准偏移（0.1 °C 整数），初始为零偏移。
+ * 更换文件后继续使用当前偏移；仅"重置"恢复零偏移。
+ */
+const calibrationTenths = ref(0);
+/** 校准偏移输入框文本，更换文件后保留 */
+const calibrationInput = ref('0.0');
+/**
+ * 校准输入校验错误（超范围 / 非数字 / 小数位过多）：
+ * 在输入处反馈，生效偏移保持上次有效结果不变。
+ */
+const calibrationError = ref<string | null>(null);
+/** 当前生效偏移的摄氏度表示，如 "+1.5"、"0.0" */
+const calibrationOffsetC = computed(() => formatOffsetC(calibrationTenths.value));
 
 const error = computed(() => result.value?.error ?? null);
 const frames = computed(() => result.value?.frames ?? []);
@@ -115,6 +135,36 @@ function frameRowClass(f: { index: number }): Record<string, boolean> {
 }
 
 /**
+ * 逐帧校准温度：原始值 + 偏移，按十分之一度整数相加，避免浮点漂移。
+ * 仅用于展示与报告；原始字段、湿度、连续性与告警结论不受影响。
+ */
+function frameCalibratedC(f: ParsedFrame): string {
+  return calibratedTemperatureC(f.temperatureRaw, calibrationTenths.value);
+}
+
+/** 应用校准偏移：校验通过立即刷新全部校准温度；失败保留上次有效结果 */
+function applyCalibration(): void {
+  // 坏文件禁止应用（按钮此时本不渲染，此处作防御）
+  if (!canDownload.value) return;
+  const parsed = parseCalibrationInput(calibrationInput.value);
+  if (!parsed.ok || parsed.offsetTenths === null) {
+    calibrationError.value = parsed.message;
+    return;
+  }
+  calibrationError.value = null;
+  calibrationTenths.value = parsed.offsetTenths;
+  // 输入框规范化为固定一位小数，与生效值一致
+  calibrationInput.value = formatTemperature(parsed.offsetTenths);
+}
+
+/** 重置：恢复零偏移并清除输入反馈 */
+function resetCalibration(): void {
+  calibrationTenths.value = 0;
+  calibrationInput.value = '0.0';
+  calibrationError.value = null;
+}
+
+/**
  * 读取令牌：每次选择文件递增。异步读取完成时若令牌已过期
  * （等待期间又选择了更新的文件），结果直接丢弃，保证页面
  * 始终只保留最后选择文件的结果，慢读取的旧批次不得覆盖新批次。
@@ -130,6 +180,9 @@ async function handleFile(file: File): Promise<void> {
   result.value = null;
   // 更换文件即清除上一批次的片段定位与帧区间高亮
   selectedSegmentId.value = null;
+  // 校准偏移与输入框文本跨文件保留（继续使用当前偏移），
+  // 仅清除上一批次的输入校验反馈
+  calibrationError.value = null;
   fileName.value = file.name;
   fileSize.value = file.size;
   try {
@@ -167,6 +220,8 @@ function downloadJson(): void {
     fileSize.value,
     result.value.frames,
     alarms.value,
+    // 与页面一致：报告始终携带当前生效的校准说明与逐帧校准温度
+    { offsetTenths: calibrationTenths.value },
   );
   const blob = new Blob([JSON.stringify(report, null, 2)], {
     type: 'application/json',
@@ -237,6 +292,50 @@ function downloadJson(): void {
         其后数据一律不予采信。
       </p>
       <p v-else>第一个帧即损坏，没有可保留的合法帧。</p>
+    </section>
+
+    <section v-if="result" id="calibration" class="calibration">
+      <h2>温度校准（复核用，不改写原始读数）</h2>
+      <p v-if="error" data-testid="calibration-blocked" class="calibration-skipped">
+        文件不合格，禁止应用校准偏移：解析已在首个非法字节停止，
+        当前生效偏移 {{ calibrationOffsetC }} °C 不会作用于该批次，下载同样被禁止。
+      </p>
+      <template v-else>
+        <p class="hint">
+          探头定期校准后会产生统一温度偏移。输入当前校准值（0.1 °C 步进，
+          -10.0 至 +10.0 °C）并应用后，帧表将并列显示原始温度与校准温度；
+          湿度、序号连续性与告警结论仍基于原始字段。更换文件后继续使用当前偏移，
+          重置则恢复零偏移。
+        </p>
+        <p data-testid="calibration-current" class="calibration-current">
+          当前生效偏移：{{ calibrationOffsetC }} °C
+        </p>
+        <div class="calibration-controls">
+          <label for="calibration-input">校准偏移（°C）</label>
+          <input
+            id="calibration-input"
+            v-model="calibrationInput"
+            data-testid="calibration-input"
+            type="text"
+            inputmode="decimal"
+            placeholder="-10.0 ~ +10.0"
+            @keydown.enter="applyCalibration"
+          />
+          <button id="calibration-apply" type="button" @click="applyCalibration">
+            应用
+          </button>
+          <button id="calibration-reset" type="button" @click="resetCalibration">
+            重置
+          </button>
+        </div>
+        <p
+          v-if="calibrationError"
+          data-testid="calibration-error"
+          class="calibration-error"
+        >
+          {{ calibrationError }}
+        </p>
+      </template>
     </section>
 
     <section v-if="result" id="continuity" class="continuity">
@@ -348,7 +447,8 @@ function downloadJson(): void {
               <th>低温</th>
               <th>低电量</th>
               <th>时间戳（秒）</th>
-              <th>温度（°C）</th>
+              <th>原始温度（°C）</th>
+              <th>校准温度（°C）</th>
               <th>湿度（%）</th>
               <th>序号</th>
             </tr>
@@ -377,6 +477,7 @@ function downloadJson(): void {
               <td>{{ f.flags.lowBattery ? '是' : '否' }}</td>
               <td>{{ f.timestamp }}</td>
               <td>{{ f.temperatureC }}</td>
+              <td class="calibrated-temp">{{ frameCalibratedC(f) }}</td>
               <td>{{ f.humidity }}</td>
               <td>{{ f.sequence }}</td>
             </tr>

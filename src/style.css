@@ -205,3 +205,75 @@ tr.alarm-highlight.gap-after td {
 #download:hover {
   background: #1d4ed8;
 }
+
+.calibration {
+  border: 1px solid #2a3646;
+  background: #131b26;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin: 16px 0;
+}
+
+.calibration h2 {
+  margin: 0 0 8px;
+}
+
+.calibration p {
+  margin: 0 0 8px;
+}
+
+.calibration-current {
+  color: #4ade80;
+}
+
+.calibration-skipped {
+  color: #8fa1b6;
+}
+
+.calibration-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.calibration-controls input {
+  width: 130px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid #3b82f6;
+  background: #0f141b;
+  color: #dbe4ee;
+  font-size: 14px;
+}
+
+.calibration-controls button {
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  padding: 7px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.calibration-controls button:hover {
+  background: #1d4ed8;
+}
+
+#calibration-reset {
+  background: #374151;
+}
+
+#calibration-reset:hover {
+  background: #4b5563;
+}
+
+.calibration-error {
+  color: #fca5a5;
+}
+
+td.calibrated-temp {
+  color: #7dd3fc;
+}
