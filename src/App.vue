@@ -31,6 +31,10 @@ const FIELD_LABELS: Record<FieldName, string> = {
 const fileName = ref<string | null>(null);
 const fileSize = ref(0);
 const result = ref<ParseResult | null>(null);
+/** 正在异步读取文件：此期间不展示任何批次结果，下载入口隐藏 */
+const reading = ref(false);
+/** 本次选择的文件读取失败（非解析失败），与旧批次结果严格区分 */
+const readError = ref<string | null>(null);
 const dragOver = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
 
@@ -52,12 +56,35 @@ const gapAfterIndexes = computed(
   () => new Set((continuity.value?.gaps ?? []).map((g) => g.nextIndex)),
 );
 
+/**
+ * 读取令牌：每次选择文件递增。异步读取完成时若令牌已过期
+ * （等待期间又选择了更新的文件），结果直接丢弃，保证页面
+ * 始终只保留最后选择文件的结果，慢读取的旧批次不得覆盖新批次。
+ */
+let readToken = 0;
+
 async function handleFile(file: File): Promise<void> {
-  // 纯浏览器内读取，不上传、不访问任何外部服务
-  const buffer = await file.arrayBuffer();
-  result.value = parseFrames(new Uint8Array(buffer));
+  const token = ++readToken;
+  // 选择瞬间即进入读取中状态：清空旧批次结果与旧读取错误，
+  // 避免等待期间旧报告被当作新文件的结果展示或下载
+  reading.value = true;
+  readError.value = null;
+  result.value = null;
   fileName.value = file.name;
   fileSize.value = file.size;
+  try {
+    // 纯浏览器内读取，不上传、不访问任何外部服务
+    const buffer = await file.arrayBuffer();
+    if (token !== readToken) return; // 已有更新的选择，丢弃过期结果
+    result.value = parseFrames(new Uint8Array(buffer));
+  } catch {
+    if (token !== readToken) return;
+    // 读取失败：旧结果已在选择时清空，此处明确标记本次失败，
+    // 下载入口保持隐藏，旧批次结果不得被误用
+    readError.value = `无法读取文件「${file.name}」（${file.size} 字节）：浏览器读取失败。本次选择未产生任何结果，请检查文件后重新选择。`;
+  } finally {
+    if (token === readToken) reading.value = false;
+  }
 }
 
 function onDrop(event: DragEvent): void {
@@ -108,7 +135,11 @@ function downloadJson(): void {
       @drop.prevent="onDrop"
       @click="fileInput?.click()"
     >
-      <p v-if="!fileName">将记录文件拖放到此处，或点击选择文件</p>
+      <p v-if="reading" data-testid="reading">
+        正在读取 <strong data-testid="file-name">{{ fileName }}</strong>
+        （{{ fileSize }} 字节），请稍候……读取完成前不会展示或下载任何批次结果。
+      </p>
+      <p v-else-if="!fileName">将记录文件拖放到此处，或点击选择文件</p>
       <p v-else>
         当前文件：<strong data-testid="file-name">{{ fileName }}</strong>
         （{{ fileSize }} 字节）—— 拖放或点击可更换文件
@@ -121,6 +152,14 @@ function downloadJson(): void {
         @change="onPick"
       />
     </div>
+
+    <section v-if="readError" class="error" role="alert">
+      <h2>读取失败 —— 未能读取本次选择的文件，此前批次结果已作废</h2>
+      <p data-testid="read-error" class="mono">{{ readError }}</p>
+      <p>
+        此前批次的任何结果与下载入口均已清除，不会被当作本次文件的结果。
+      </p>
+    </section>
 
     <section v-if="error" class="error" role="alert">
       <h2>解析失败 —— 整文件判定不合格，已禁止下载</h2>
