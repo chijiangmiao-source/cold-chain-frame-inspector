@@ -225,7 +225,7 @@ test('坏文件禁止应用校准与下载，合法文件恢复后偏移仍在',
   await applyOffset(page, '1.0');
   await expect(frameCell(page, 0, 9)).toHaveText('24.5');
 
-  // 换成坏文件：无校准输入入口、无下载入口
+  // 换成坏文件：无校准输入/应用入口、无下载入口，但重置入口保留
   await dropFile(page, 'bad.bin', [
     ...makeFrame({ tempRaw: 235, seq: 1 }),
     ...makeFrame({ magic: [0x00, 0x00], seq: 2 }),
@@ -234,7 +234,7 @@ test('坏文件禁止应用校准与下载，合法文件恢复后偏移仍在',
   await expect(page.getByTestId('calibration-blocked')).toContainText('禁止应用校准偏移');
   await expect(page.getByTestId('calibration-input')).toHaveCount(0);
   await expect(page.locator('#calibration-apply')).toHaveCount(0);
-  await expect(page.locator('#calibration-reset')).toHaveCount(0);
+  await expect(page.locator('#calibration-reset')).toBeVisible();
   await expect(page.locator('#download')).toHaveCount(0);
 
   // 换回合法文件：偏移继续生效
@@ -242,6 +242,72 @@ test('坏文件禁止应用校准与下载，合法文件恢复后偏移仍在',
   await expect(page.getByTestId('calibration-input')).toBeVisible();
   await expect(page.getByTestId('calibration-current')).toContainText('+1.0 °C');
   await expect(frameCell(page, 0, 9)).toHaveText('11.0');
+});
+
+test('坏文件的保留帧不应用当前偏移，校准温度与原始温度一致', async ({ page }) => {
+  await dropFile(page, 'good.bin', makeFrame({ tempRaw: 235, seq: 1 }));
+  await applyOffset(page, '1.5');
+  await expect(frameCell(page, 0, 9)).toHaveText('25.0');
+
+  // 换入含合法前缀的坏文件：页面声明偏移不作用于该批次
+  await dropFile(page, 'bad.bin', [
+    ...makeFrame({ tempRaw: 235, seq: 1 }),
+    ...makeFrame({ tempRaw: -155, seq: 2 }),
+    ...makeFrame({ magic: [0x00, 0x00], seq: 3 }),
+  ]);
+  await expect(page.getByTestId('calibration-blocked')).toContainText('不会作用于该批次');
+  // 生效偏移本身保留（跨文件继承），只是不作用于该不合格批次
+  await expect(page.getByTestId('calibration-current')).toContainText('+1.5 °C');
+  // 保留帧的校准温度列不得显示偏移后的温度：与原始温度一致
+  await expect(frameCell(page, 0, 8)).toHaveText('23.5');
+  await expect(frameCell(page, 0, 9)).toHaveText('23.5');
+  await expect(frameCell(page, 1, 8)).toHaveText('-15.5');
+  await expect(frameCell(page, 1, 9)).toHaveText('-15.5');
+});
+
+test('输入非法值后更换合法文件：错误清除且输入框同步为当前生效偏移', async ({ page }) => {
+  await dropFile(page, 'a.bin', makeFrame({ tempRaw: 235, seq: 1 }));
+  await applyOffset(page, '2.0');
+  await expect(frameCell(page, 0, 9)).toHaveText('25.5');
+
+  // 输入非法值：输入处反馈错误，生效值保持 +2.0
+  await applyOffset(page, 'abc');
+  await expect(page.getByTestId('calibration-error')).toContainText('不是有效数字');
+  await expect(page.getByTestId('calibration-input')).toHaveValue('abc');
+  await expect(page.getByTestId('calibration-current')).toContainText('+2.0 °C');
+
+  // 更换合法文件：错误清除，非法文本不得残留，输入框与生效偏移一致
+  await dropFile(page, 'b.bin', makeFrame({ tempRaw: 100, seq: 5 }));
+  await expect(page.getByTestId('calibration-error')).toHaveCount(0);
+  await expect(page.getByTestId('calibration-input')).toHaveValue('2.0');
+  await expect(page.getByTestId('calibration-current')).toContainText('+2.0 °C');
+  await expect(frameCell(page, 0, 9)).toHaveText('12.0');
+});
+
+test('带非零偏移打开不合格批次：重置入口可用，可恢复零偏移', async ({ page }) => {
+  await dropFile(page, 'good.bin', makeFrame({ tempRaw: 235, seq: 1 }));
+  await applyOffset(page, '3.0');
+  await expect(page.getByTestId('calibration-current')).toContainText('+3.0 °C');
+
+  // 带着非零偏移打开不合格批次：禁止应用，但重置入口保留
+  await dropFile(page, 'bad.bin', [
+    ...makeFrame({ tempRaw: 235, seq: 1 }),
+    ...makeFrame({ magic: [0x00, 0x00], seq: 2 }),
+  ]);
+  await expect(page.getByTestId('calibration-blocked')).toBeVisible();
+  await expect(page.getByTestId('calibration-input')).toHaveCount(0);
+  await expect(page.locator('#calibration-reset')).toBeVisible();
+
+  // 在不合格状态下重置：跨文件偏移恢复为零
+  await page.locator('#calibration-reset').click();
+  await expect(page.getByTestId('calibration-current')).toContainText('0.0 °C');
+  await expect(page.getByTestId('calibration-blocked')).toContainText('0.0 °C 不会作用于该批次');
+
+  // 换回合法文件：零偏移生效，输入框同步为 0.0
+  await dropFile(page, 'good2.bin', makeFrame({ tempRaw: 235, seq: 1 }));
+  await expect(page.getByTestId('calibration-current')).toContainText('0.0 °C');
+  await expect(page.getByTestId('calibration-input')).toHaveValue('0.0');
+  await expect(frameCell(page, 0, 9)).toHaveText('23.5');
 });
 
 test('下载报告包含校准说明与逐帧校准温度，与页面一致', async ({ page }) => {
