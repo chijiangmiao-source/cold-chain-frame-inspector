@@ -139,9 +139,10 @@ describe('推进、暂停与结束（虚拟时间）', () => {
     expect(session.currentIndex).toBe(1);
     expect(session.status).toBe('playing');
 
+    // 推进到末帧：立即结束，不再多等一拍
     vi.advanceTimersByTime(REPLAY_INTERVAL_MS);
     expect(session.currentIndex).toBe(2);
-    expect(session.status).toBe('playing');
+    expect(session.status).toBe('ended');
   });
 
   it('默认时钟使用全局 setInterval，推进节拍为 1000ms', () => {
@@ -153,18 +154,16 @@ describe('推进、暂停与结束（虚拟时间）', () => {
     expect(session.currentIndex).toBe(0);
     vi.advanceTimersByTime(1);
     expect(session.currentIndex).toBe(1);
+    expect(session.status).toBe('ended');
   });
 
-  it('抵达末帧后再推进一拍进入已结束，时钟停止且停在末帧', () => {
+  it('推进到末帧立即进入已结束，时钟停止且停在末帧', () => {
     const session = createReplaySession(makeFrames(2));
     session.play();
+    // 第一拍即推进到末帧：状态立即结束，无需多等一拍
     vi.advanceTimersByTime(REPLAY_INTERVAL_MS);
     expect(session.currentIndex).toBe(1);
-    expect(session.status).toBe('playing');
-
-    vi.advanceTimersByTime(REPLAY_INTERVAL_MS);
     expect(session.status).toBe('ended');
-    expect(session.currentIndex).toBe(1);
     expect(vi.getTimerCount()).toBe(0);
 
     // 结束后时间继续流逝也不再变化
@@ -173,13 +172,12 @@ describe('推进、暂停与结束（虚拟时间）', () => {
     expect(session.currentIndex).toBe(1);
   });
 
-  it('单帧批次：播放后一拍即结束', () => {
+  it('单帧批次：首帧即末帧，播放立即结束', () => {
     const session = createReplaySession(makeFrames(1));
     session.play();
-    expect(session.status).toBe('playing');
-    vi.advanceTimersByTime(REPLAY_INTERVAL_MS);
     expect(session.status).toBe('ended');
     expect(session.currentIndex).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('暂停后时间推进不再改变当前帧，继续播放从暂停处前进', () => {
@@ -215,7 +213,8 @@ describe('推进、暂停与结束（虚拟时间）', () => {
   it('已结束时再次播放从首帧重新开始', () => {
     const session = createReplaySession(makeFrames(3));
     session.play();
-    vi.advanceTimersByTime(3 * REPLAY_INTERVAL_MS);
+    // 两拍抵达末帧并立即结束
+    vi.advanceTimersByTime(2 * REPLAY_INTERVAL_MS);
     expect(session.status).toBe('ended');
     expect(session.currentIndex).toBe(2);
 
@@ -224,6 +223,21 @@ describe('推进、暂停与结束（虚拟时间）', () => {
     expect(session.currentIndex).toBe(0);
     vi.advanceTimersByTime(REPLAY_INTERVAL_MS);
     expect(session.currentIndex).toBe(1);
+  });
+
+  it('当前帧已是末帧时播放立即结束，再次播放从首帧重播', () => {
+    const session = createReplaySession(makeFrames(3));
+    // 待播放时定位到末帧再播放：立即结束
+    session.seek(2);
+    session.play();
+    expect(session.status).toBe('ended');
+    expect(session.currentIndex).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // 再次播放从首帧重新开始
+    session.play();
+    expect(session.status).toBe('playing');
+    expect(session.currentIndex).toBe(0);
   });
 
   it('推进、暂停与结束的结果在虚拟时间下可重复', () => {
@@ -264,7 +278,8 @@ describe('推进、暂停与结束（虚拟时间）', () => {
       'playing@1',
       'paused@1',
       'paused@1',
-      'playing@3',
+      // 从第 1 帧续播两拍：第 2 帧（播放中）→ 第 3 帧（末帧，立即结束）
+      'ended@3',
       'ended@3',
       'playing@0',
       'playing@1',
@@ -308,16 +323,35 @@ describe('拖动定位', () => {
     session.seek(3);
     expect(session.currentIndex).toBe(3);
     expect(session.status).toBe('playing');
+    // 推进到末帧立即结束
     vi.advanceTimersByTime(REPLAY_INTERVAL_MS);
     expect(session.currentIndex).toBe(4);
-    vi.advanceTimersByTime(REPLAY_INTERVAL_MS);
     expect(session.status).toBe('ended');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('播放中拖动到末帧立即结束', () => {
+    const session = createReplaySession(makeFrames(5));
+    session.play();
+    vi.advanceTimersByTime(REPLAY_INTERVAL_MS);
+    expect(session.currentIndex).toBe(1);
+
+    session.seek(4);
+    expect(session.currentIndex).toBe(4);
+    expect(session.status).toBe('ended');
+    expect(vi.getTimerCount()).toBe(0);
+
+    // 再次播放从首帧重播
+    session.play();
+    expect(session.status).toBe('playing');
+    expect(session.currentIndex).toBe(0);
   });
 
   it('已结束时定位脱离结束态转为已暂停，再次播放从定位处继续', () => {
     const session = createReplaySession(makeFrames(4));
     session.play();
-    vi.advanceTimersByTime(4 * REPLAY_INTERVAL_MS);
+    // 三拍抵达末帧并立即结束
+    vi.advanceTimersByTime(3 * REPLAY_INTERVAL_MS);
     expect(session.status).toBe('ended');
 
     session.seek(1);
@@ -327,6 +361,7 @@ describe('拖动定位', () => {
     session.play();
     vi.advanceTimersByTime(REPLAY_INTERVAL_MS);
     expect(session.currentIndex).toBe(2);
+    expect(session.status).toBe('playing');
   });
 });
 
@@ -385,11 +420,9 @@ describe('可注入时钟', () => {
     session.play();
     expect(timers.size).toBe(1);
 
+    // 推进到末帧立即结束，注入的时钟被清除
     fireAll();
     expect(session.currentIndex).toBe(1);
-    expect(session.status).toBe('playing');
-
-    fireAll();
     expect(session.status).toBe('ended');
     expect(timers.size).toBe(0);
   });
@@ -406,7 +439,7 @@ describe('状态变化通知', () => {
 
   it('每次状态或当前帧变化时回调并回传会话自身', () => {
     const events: Array<{ status: ReplayStatus; index: number; self: ReplaySession }> = [];
-    const session = createReplaySession(makeFrames(2), {
+    const session = createReplaySession(makeFrames(3), {
       onChange: (s) => events.push({ status: s.status, index: s.currentIndex, self: s }),
     });
 
@@ -424,7 +457,8 @@ describe('状态变化通知', () => {
       'paused@0',
       'playing@0',
       'playing@1',
-      'ended@1',
+      // 推进到末帧（第 2 帧）立即结束
+      'ended@2',
     ]);
     for (const e of events) expect(e.self).toBe(session);
   });

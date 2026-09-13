@@ -67,7 +67,7 @@ test.beforeEach(async ({ page }) => {
   await page.clock.install();
 });
 
-test('播放逐帧推进并同步高亮当前帧，暂停后保持', async ({ page }) => {
+test('播放逐帧推进并同步高亮当前帧，暂停后保持，抵达末帧立即结束', async ({ page }) => {
   await dropFile(page, 'review.bin', [
     ...makeFrame({ timestamp: 1_700_000_000, tempRaw: 235, humidity: 45, seq: 7, flags: 0b001 }),
     ...makeFrame({ timestamp: 1_700_000_060, tempRaw: -155, humidity: 60, seq: 8 }),
@@ -98,17 +98,20 @@ test('播放逐帧推进并同步高亮当前帧，暂停后保持', async ({ pa
   await expect(frameRows(page).nth(0)).not.toHaveClass(/replay-current/);
   await expect(frameRows(page).nth(1)).toHaveClass(/replay-current/);
 
-  await page.clock.runFor(1000);
-  await expect(page.getByTestId('replay-position')).toHaveText('第 3 / 3 帧');
-  await expect(page.getByTestId('replay-alarms')).toHaveText('低电量');
-  await expect(frameRows(page).nth(2)).toHaveClass(/replay-current/);
-
-  // 暂停：保持当前帧，时间推进不再变化（也不会进入已结束）
+  // 暂停：保持当前帧，时间推进不再变化
   await page.locator('#replay-pause').click();
   await expect(page.getByTestId('replay-status')).toHaveText('已暂停');
   await page.clock.runFor(5000);
   await expect(page.getByTestId('replay-status')).toHaveText('已暂停');
+  await expect(page.getByTestId('replay-position')).toHaveText('第 2 / 3 帧');
+  await expect(frameRows(page).nth(1)).toHaveClass(/replay-current/);
+
+  // 继续播放：抵达末帧立即结束（不多等一拍），高亮停在末帧
+  await page.locator('#replay-play').click();
+  await page.clock.runFor(1000);
+  await expect(page.getByTestId('replay-status')).toHaveText('已结束');
   await expect(page.getByTestId('replay-position')).toHaveText('第 3 / 3 帧');
+  await expect(page.getByTestId('replay-alarms')).toHaveText('低电量');
   await expect(frameRows(page).nth(2)).toHaveClass(/replay-current/);
 });
 
@@ -135,20 +138,28 @@ test('拖动进度立即定位任意帧，播放中定位后继续推进', async
   await expect(page.getByTestId('replay-position')).toHaveText('第 1 / 5 帧');
   await expect(frameRows(page).nth(0)).toHaveClass(/replay-current/);
 
-  // 播放中拖动：从定位处继续推进直至末帧结束
+  // 播放中拖到中间帧：从定位处继续推进
   await page.locator('#replay-play').click();
   await page.clock.runFor(1000);
   await expect(page.getByTestId('replay-position')).toHaveText('第 2 / 5 帧');
-  await dragProgressTo(page, 4);
+  await dragProgressTo(page, 2);
   await expect(page.getByTestId('replay-status')).toHaveText('播放中');
+  await expect(page.getByTestId('replay-position')).toHaveText('第 3 / 5 帧');
+  await page.clock.runFor(1000);
+  await expect(page.getByTestId('replay-position')).toHaveText('第 4 / 5 帧');
+  await expect(page.getByTestId('replay-status')).toHaveText('播放中');
+
+  // 播放中拖到末帧：立即结束，无需多等一拍
+  await dragProgressTo(page, 4);
+  await expect(page.getByTestId('replay-status')).toHaveText('已结束');
   await expect(page.getByTestId('replay-position')).toHaveText('第 5 / 5 帧');
   await expect(frameRows(page).nth(4)).toHaveClass(/replay-current/);
-  await page.clock.runFor(1000);
+  await page.clock.runFor(3000);
   await expect(page.getByTestId('replay-status')).toHaveText('已结束');
   await expect(page.getByTestId('replay-position')).toHaveText('第 5 / 5 帧');
 });
 
-test('抵达末帧后进入已结束，再次播放从首帧开始', async ({ page }) => {
+test('抵达末帧立即进入已结束，再次播放从首帧开始', async ({ page }) => {
   await dropFile(page, 'end.bin', [
     ...makeFrame({ tempRaw: 100, seq: 0 }),
     ...makeFrame({ tempRaw: 110, seq: 1 }),
@@ -156,7 +167,8 @@ test('抵达末帧后进入已结束，再次播放从首帧开始', async ({ pa
   ]);
 
   await page.locator('#replay-play').click();
-  await page.clock.runFor(3000);
+  // 3 帧批次两拍即抵达末帧：状态立即结束，无需多等一拍
+  await page.clock.runFor(2000);
   await expect(page.getByTestId('replay-status')).toHaveText('已结束');
   await expect(page.getByTestId('replay-position')).toHaveText('第 3 / 3 帧');
   await expect(frameRows(page).nth(2)).toHaveClass(/replay-current/);
@@ -169,6 +181,7 @@ test('抵达末帧后进入已结束，再次播放从首帧开始', async ({ pa
   await expect(frameRows(page).nth(0)).toHaveClass(/replay-current/);
   await page.clock.runFor(1000);
   await expect(page.getByTestId('replay-position')).toHaveText('第 2 / 3 帧');
+  await expect(page.getByTestId('replay-status')).toHaveText('播放中');
 });
 
 test('换入合法文件时旧会话立即销毁并按新帧重建', async ({ page }) => {
@@ -199,9 +212,10 @@ test('换入合法文件时旧会话立即销毁并按新帧重建', async ({ pa
   await expect(page.getByTestId('replay-status')).toHaveText('待播放');
   await expect(page.getByTestId('replay-position')).toHaveText('第 1 / 2 帧');
 
-  // 新会话可正常播放
+  // 新会话可正常播放：推进到末帧立即结束
   await page.locator('#replay-play').click();
   await page.clock.runFor(1000);
+  await expect(page.getByTestId('replay-status')).toHaveText('已结束');
   await expect(page.getByTestId('replay-position')).toHaveText('第 2 / 2 帧');
   await expect(page.getByTestId('replay-alarms')).toHaveText('高温');
 });
@@ -241,4 +255,11 @@ test('坏文件或空文件：面板解释无法复盘且不利用保留前缀',
   await expect(page.locator('#replay-play')).toBeVisible();
   await expect(page.getByTestId('replay-status')).toHaveText('待播放');
   await expect(page.getByTestId('replay-position')).toHaveText('第 1 / 1 帧');
+
+  // 单帧批次：首帧即末帧，播放立即结束；再次播放重新复盘
+  await page.locator('#replay-play').click();
+  await expect(page.getByTestId('replay-status')).toHaveText('已结束');
+  await expect(page.getByTestId('replay-position')).toHaveText('第 1 / 1 帧');
+  await page.locator('#replay-play').click();
+  await expect(page.getByTestId('replay-status')).toHaveText('已结束');
 });

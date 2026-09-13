@@ -4,7 +4,7 @@
  * 观察告警与温度变化如何逐帧出现，而不必在长表格中反复滚动。
  *
  * 状态机：待播放(idle) → 播放中(playing) → 已暂停(paused) / 已结束(ended)。
- * 播放中每推进一拍前进一帧；抵达末帧后再推进一拍进入已结束；
+ * 播放中每推进一拍前进一帧，抵达末帧立即进入已结束（不多等一拍）；
  * 已结束时再次播放从首帧重新开始；拖动定位可立即跳到任意帧。
  *
  * 会话只消费解析结果（ParsedFrame），不反向影响解析、校准、连续性、
@@ -69,11 +69,11 @@ export interface ReplaySession {
   readonly timeline: readonly ReplayFrameSnapshot[];
   /** 当前帧快照 */
   current(): ReplayFrameSnapshot;
-  /** 播放：待播放 / 已暂停时开始或继续；已结束时从首帧重新开始 */
+  /** 播放：待播放 / 已暂停时开始或继续；已结束时从首帧重新开始；当前帧已是末帧时立即结束 */
   play(): void;
   /** 暂停：仅播放中有效，其余状态为空操作 */
   pause(): void;
-  /** 拖动定位：立即跳到任意帧（越界钳制）；已结束时定位后转为已暂停 */
+  /** 拖动定位：立即跳到任意帧（越界钳制）；已结束时定位后转为已暂停；播放中定位到末帧立即结束 */
   seek(index: number): void;
   /** 销毁：停止时钟，之后所有操作均为空操作 */
   destroy(): void;
@@ -141,10 +141,15 @@ class ReplaySessionImpl implements ReplaySession {
 
   play(): void {
     if (this._destroyed || this._status === 'playing') return;
-    // 抵达末帧结束后再次播放：从首帧重新开始
+    // 已结束时再次播放：从首帧重新开始
     if (this._status === 'ended') this._currentIndex = 0;
-    this._status = 'playing';
-    this.startTimer();
+    if (this._currentIndex >= this.frameCount - 1) {
+      // 当前帧已是末帧（如单帧批次、或定位到末帧后播放）：立即结束
+      this._status = 'ended';
+    } else {
+      this._status = 'playing';
+      this.startTimer();
+    }
     this.emit();
   }
 
@@ -159,8 +164,14 @@ class ReplaySessionImpl implements ReplaySession {
     if (this._destroyed) return;
     const clamped = Math.min(Math.max(Math.trunc(index), 0), this.frameCount - 1);
     this._currentIndex = clamped;
-    // 已结束时拖回任意帧：脱离结束态，等待再次播放
-    if (this._status === 'ended') this._status = 'paused';
+    if (this._status === 'ended') {
+      // 已结束时拖回任意帧：脱离结束态，等待再次播放
+      this._status = 'paused';
+    } else if (this._status === 'playing' && clamped >= this.frameCount - 1) {
+      // 播放中拖到末帧：与播放到末帧一致，立即结束
+      this.stopTimer();
+      this._status = 'ended';
+    }
     this.emit();
   }
 
@@ -184,12 +195,12 @@ class ReplaySessionImpl implements ReplaySession {
 
   private tick(): void {
     if (this._destroyed || this._status !== 'playing') return;
+    // 播放中当前帧必在末帧之前（play / seek 均保证），前进一步不会越界
+    this._currentIndex += 1;
     if (this._currentIndex >= this.frameCount - 1) {
-      // 末帧再推进一拍：整场复盘结束，时钟停止
+      // 推进到末帧：立即结束，不再多等一拍
       this.stopTimer();
       this._status = 'ended';
-    } else {
-      this._currentIndex += 1;
     }
     this.emit();
   }
