@@ -4,6 +4,7 @@ import {
   checkSequenceContinuity,
   formatTemperature,
   FRAME_SIZE,
+  mergeAlarmSegments,
   parseFrames,
 } from '../src/parser';
 
@@ -364,7 +365,7 @@ describe('序号连续性', () => {
     );
     const r = parseFrames(data);
     expect(r.error).toBeNull();
-    const report = buildReport('gap.bin', data.length, r.frames);
+    const report = buildReport('gap.bin', data.length, r.frames, mergeAlarmSegments(r.frames));
     expect(report.continuity).toEqual(checkSequenceContinuity(r.frames));
     expect(report.continuity.continuous).toBe(false);
     expect(report.continuity.gaps).toEqual([
@@ -382,7 +383,12 @@ describe('序号连续性', () => {
   it('连续文件的报告摘要为无断点', () => {
     const data = bytes(makeFrame({ seq: 255 }), makeFrame({ seq: 0 }));
     const r = parseFrames(data);
-    const report = buildReport('ok.bin', data.length, r.frames);
+    const report = buildReport(
+      'ok.bin',
+      data.length,
+      r.frames,
+      mergeAlarmSegments(r.frames),
+    );
     expect(report.continuity).toEqual({ continuous: true, gaps: [] });
   });
 });
@@ -394,7 +400,12 @@ describe('下载报告', () => {
     );
     const r = parseFrames(data);
     expect(r.error).toBeNull();
-    const report = buildReport('log.bin', data.length, r.frames);
+    const report = buildReport(
+      'log.bin',
+      data.length,
+      r.frames,
+      mergeAlarmSegments(r.frames),
+    );
     expect(report.fileName).toBe('log.bin');
     expect(report.fileSize).toBe(12);
     expect(report.frameCount).toBe(1);
@@ -407,5 +418,234 @@ describe('下载报告', () => {
       offset: 4,
       value: 1_700_000_000,
     });
+  });
+});
+
+describe('告警片段归并', () => {
+  /** 仅按 flags + seq 造帧，时间戳取便于断言的值 */
+  function alarmsOf(specs: Array<{ flags?: number; seq?: number; ts?: number }>) {
+    const r = parseFrames(
+      bytes(...specs.map((s, i) => makeFrame({ flags: s.flags ?? 0, seq: s.seq ?? i, timestamp: s.ts ?? 100 + i }))),
+    );
+    expect(r.error).toBeNull();
+    return mergeAlarmSegments(r.frames);
+  }
+
+  it('无任何告警时摘要计数全为零、片段为空', () => {
+    const a = alarmsOf([{ flags: 0 }, { flags: 0 }]);
+    expect(a.summary).toEqual({ totalSegments: 0, highTemp: 0, lowTemp: 0, lowBattery: 0 });
+    expect(a.segments).toEqual([]);
+  });
+
+  it('空文件归并结果为空摘要', () => {
+    const a = mergeAlarmSegments(parseFrames(new Uint8Array(0)).frames);
+    expect(a.summary).toEqual({ totalSegments: 0, highTemp: 0, lowTemp: 0, lowBattery: 0 });
+    expect(a.segments).toEqual([]);
+  });
+
+  it('三类重叠告警：同一区间各自独立成片，帧计数与区间相同', () => {
+    const a = alarmsOf([
+      { flags: 0b111, seq: 0 },
+      { flags: 0b111, seq: 1 },
+      { flags: 0b111, seq: 2 },
+    ]);
+    expect(a.summary).toEqual({ totalSegments: 3, highTemp: 1, lowTemp: 1, lowBattery: 1 });
+    expect(a.segments).toHaveLength(3);
+    // 按类型顺序：高温、低温、低电量
+    expect(a.segments.map((s) => s.type)).toEqual(['highTemp', 'lowTemp', 'lowBattery']);
+    for (const s of a.segments) {
+      expect(s).toMatchObject({
+        startFrameIndex: 0,
+        endFrameIndex: 2,
+        startOffset: 0,
+        endOffset: 3 * FRAME_SIZE - 1,
+        startTimestamp: 100,
+        endTimestamp: 102,
+        frameCount: 3,
+      });
+    }
+  });
+
+  it('三类告警区间互不相同：逐类型归并、组内按文件顺序', () => {
+    // 帧 0：高温；帧 1：高温+低温；帧 2：低温；帧 3：低电量；帧 4：无
+    const a = alarmsOf([
+      { flags: 0b001 },
+      { flags: 0b011 },
+      { flags: 0b010 },
+      { flags: 0b100 },
+      { flags: 0b000 },
+    ]);
+    expect(a.summary).toEqual({ totalSegments: 3, highTemp: 1, lowTemp: 1, lowBattery: 1 });
+    const high = a.segments.filter((s) => s.type === 'highTemp');
+    const low = a.segments.filter((s) => s.type === 'lowTemp');
+    const bat = a.segments.filter((s) => s.type === 'lowBattery');
+    expect(high).toMatchObject([{ startFrameIndex: 0, endFrameIndex: 1, frameCount: 2 }]);
+    expect(low).toMatchObject([{ startFrameIndex: 1, endFrameIndex: 2, frameCount: 2 }]);
+    expect(bat).toMatchObject([{ startFrameIndex: 3, endFrameIndex: 3, frameCount: 1 }]);
+  });
+
+  it('假值闭合后再次为真：同一类型切成多段，偏移与时间戳逐段记录', () => {
+    // 高温：帧 0、1 真；帧 2 假；帧 3 真
+    const a = alarmsOf([
+      { flags: 0b001, ts: 1000, seq: 0 },
+      { flags: 0b001, ts: 1060, seq: 1 },
+      { flags: 0b000, ts: 1120, seq: 2 },
+      { flags: 0b001, ts: 1180, seq: 3 },
+    ]);
+    expect(a.summary).toEqual({ totalSegments: 2, highTemp: 2, lowTemp: 0, lowBattery: 0 });
+    expect(a.segments).toEqual([
+      {
+        type: 'highTemp',
+        startFrameIndex: 0,
+        endFrameIndex: 1,
+        startOffset: 0,
+        endOffset: 2 * FRAME_SIZE - 1,
+        startTimestamp: 1000,
+        endTimestamp: 1060,
+        frameCount: 2,
+      },
+      {
+        type: 'highTemp',
+        startFrameIndex: 3,
+        endFrameIndex: 3,
+        startOffset: 3 * FRAME_SIZE,
+        endOffset: 4 * FRAME_SIZE - 1,
+        startTimestamp: 1180,
+        endTimestamp: 1180,
+        frameCount: 1,
+      },
+    ]);
+  });
+
+  it('序号断点处切段：相邻帧标志连续为真也不跨断点合并', () => {
+    // 低电量：帧 0、1（序号 0、1）真；序号跳到 5（帧 2）；帧 2、3（序号 5、6）真
+    const a = alarmsOf([
+      { flags: 0b100, seq: 0 },
+      { flags: 0b100, seq: 1 },
+      { flags: 0b100, seq: 5 },
+      { flags: 0b100, seq: 6 },
+    ]);
+    expect(a.summary.lowBattery).toBe(2);
+    expect(a.segments).toEqual([
+      expect.objectContaining({
+        type: 'lowBattery',
+        startFrameIndex: 0,
+        endFrameIndex: 1,
+        startOffset: 0,
+        endOffset: 2 * FRAME_SIZE - 1,
+        frameCount: 2,
+      }),
+      expect.objectContaining({
+        type: 'lowBattery',
+        startFrameIndex: 2,
+        endFrameIndex: 3,
+        startOffset: 2 * FRAME_SIZE,
+        endOffset: 4 * FRAME_SIZE - 1,
+        frameCount: 2,
+      }),
+    ]);
+  });
+
+  it('255 -> 0 回绕视为连续：标志为真时不切段', () => {
+    const a = alarmsOf([
+      { flags: 0b001, seq: 254 },
+      { flags: 0b001, seq: 255 },
+      { flags: 0b001, seq: 0 },
+      { flags: 0b001, seq: 1 },
+    ]);
+    expect(a.summary.highTemp).toBe(1);
+    expect(a.segments).toMatchObject([
+      { type: 'highTemp', startFrameIndex: 0, endFrameIndex: 3, frameCount: 4 },
+    ]);
+  });
+
+  it('断点后序号回绕（255 之后非 0）同样切段', () => {
+    const a = alarmsOf([
+      { flags: 0b010, seq: 255 },
+      { flags: 0b010, seq: 1 },
+    ]);
+    expect(a.summary.lowTemp).toBe(2);
+    expect(a.segments.map((s) => [s.startFrameIndex, s.endFrameIndex])).toEqual([
+      [0, 0],
+      [1, 1],
+    ]);
+  });
+
+  it('末帧为真时在文件结束处闭合，结束偏移为末帧最后一个字节', () => {
+    const a = alarmsOf([
+      { flags: 0b000, seq: 0, ts: 10 },
+      { flags: 0b001, seq: 1, ts: 20 },
+      { flags: 0b001, seq: 2, ts: 30 },
+    ]);
+    expect(a.segments).toHaveLength(1);
+    expect(a.segments[0]).toEqual({
+      type: 'highTemp',
+      startFrameIndex: 1,
+      endFrameIndex: 2,
+      startOffset: FRAME_SIZE,
+      endOffset: 3 * FRAME_SIZE - 1,
+      startTimestamp: 20,
+      endTimestamp: 30,
+      frameCount: 2,
+    });
+  });
+
+  it('单帧置位自成一段', () => {
+    const a = alarmsOf([{ flags: 0b100, seq: 42, ts: 7 }]);
+    expect(a.segments).toEqual([
+      {
+        type: 'lowBattery',
+        startFrameIndex: 0,
+        endFrameIndex: 0,
+        startOffset: 0,
+        endOffset: FRAME_SIZE - 1,
+        startTimestamp: 7,
+        endTimestamp: 7,
+        frameCount: 1,
+      },
+    ]);
+  });
+
+  it('多处断点与真假切换同时存在时全部切段', () => {
+    // 高温：帧 0 真、帧 1 真（连续）；帧 2 序号断点且为真 -> 新段；帧 3 假 -> 闭合；帧 4 真 -> 新段
+    const a = alarmsOf([
+      { flags: 0b001, seq: 0 },
+      { flags: 0b001, seq: 1 },
+      { flags: 0b001, seq: 9 },
+      { flags: 0b000, seq: 10 },
+      { flags: 0b001, seq: 11 },
+    ]);
+    expect(a.summary.highTemp).toBe(3);
+    expect(a.segments.map((s) => [s.startFrameIndex, s.endFrameIndex])).toEqual([
+      [0, 1],
+      [2, 2],
+      [4, 4],
+    ]);
+  });
+
+  it('下载报告中的告警摘要与片段明细和归并函数一致', () => {
+    const data = bytes(
+      makeFrame({ flags: 0b001, seq: 0, timestamp: 100 }),
+      makeFrame({ flags: 0b001, seq: 1, timestamp: 200 }),
+      makeFrame({ flags: 0b000, seq: 2, timestamp: 300 }),
+      makeFrame({ flags: 0b111, seq: 3, timestamp: 400 }),
+    );
+    const r = parseFrames(data);
+    expect(r.error).toBeNull();
+    const merged = mergeAlarmSegments(r.frames);
+    const report = buildReport('alarm.bin', data.length, r.frames, merged);
+    expect(report.alarms).toEqual(merged);
+    expect(report.alarms.summary).toEqual({
+      totalSegments: 4,
+      highTemp: 2,
+      lowTemp: 1,
+      lowBattery: 1,
+    });
+    expect(report.alarms.segments.map((s) => [s.type, s.startFrameIndex, s.endFrameIndex])).toEqual([
+      ['highTemp', 0, 1],
+      ['highTemp', 3, 3],
+      ['lowTemp', 3, 3],
+      ['lowBattery', 3, 3],
+    ]);
   });
 });

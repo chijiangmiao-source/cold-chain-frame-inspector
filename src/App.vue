@@ -3,7 +3,10 @@ import { computed, ref } from 'vue';
 import {
   buildReport,
   checkSequenceContinuity,
+  mergeAlarmSegments,
   parseFrames,
+  type AlarmResult,
+  type AlarmType,
   type ContinuityResult,
   type ErrorField,
   type FieldName,
@@ -26,6 +29,12 @@ const FIELD_LABELS: Record<FieldName, string> = {
   temperature: '温度',
   humidity: '湿度',
   sequence: '序号',
+};
+
+const ALARM_LABELS: Record<AlarmType, string> = {
+  highTemp: '高温',
+  lowTemp: '低温',
+  lowBattery: '低电量',
 };
 
 const fileName = ref<string | null>(null);
@@ -55,6 +64,55 @@ const continuity = computed<ContinuityResult | null>(() => {
 const gapAfterIndexes = computed(
   () => new Set((continuity.value?.gaps ?? []).map((g) => g.nextIndex)),
 );
+/**
+ * 仅在整文件解析成功后归并告警片段；文件不合格时为 null，
+ * 页面据此显示"未执行"，不会依据已保留的前置帧生成片段。
+ */
+const alarms = computed<AlarmResult | null>(() => {
+  const r = result.value;
+  if (!r || r.error !== null) return null;
+  return mergeAlarmSegments(r.frames);
+});
+/** 点击片段表后定位到的片段；选择其他文件时清除 */
+const selectedSegmentId = ref<string | null>(null);
+const selectedSegment = computed(() => {
+  const id = selectedSegmentId.value;
+  if (id === null || !alarms.value) return null;
+  // 新批次的片段 id 重新生成，旧 id 匹配不上即视为无定位
+  return alarms.value.segments.find((s) => segmentId(s) === id) ?? null;
+});
+/** 当前定位片段覆盖的帧号集合，用于在帧表中高亮 */
+const highlightedFrameIndexes = computed(() => {
+  const seg = selectedSegment.value;
+  if (!seg) return new Set<number>();
+  const set = new Set<number>();
+  for (let i = seg.startFrameIndex; i <= seg.endFrameIndex; i++) set.add(i);
+  return set;
+});
+
+/** 片段在当前批次内的稳定标识：类型 + 起始帧号 */
+function segmentId(s: { type: AlarmType; startFrameIndex: number }): string {
+  return `${s.type}:${s.startFrameIndex}`;
+}
+
+function selectSegment(id: string): void {
+  selectedSegmentId.value = selectedSegmentId.value === id ? null : id;
+  if (selectedSegmentId.value === null) return;
+  const seg = selectedSegment.value;
+  if (!seg) return;
+  requestAnimationFrame(() => {
+    document
+      .querySelector(`#frames tbody tr[data-frame-index="${seg.startFrameIndex}"]`)
+      ?.scrollIntoView({ block: 'center' });
+  });
+}
+
+function frameRowClass(f: { index: number }): Record<string, boolean> {
+  return {
+    'gap-after': gapAfterIndexes.value.has(f.index),
+    'alarm-highlight': highlightedFrameIndexes.value.has(f.index),
+  };
+}
 
 /**
  * 读取令牌：每次选择文件递增。异步读取完成时若令牌已过期
@@ -70,6 +128,8 @@ async function handleFile(file: File): Promise<void> {
   reading.value = true;
   readError.value = null;
   result.value = null;
+  // 更换文件即清除上一批次的片段定位与帧区间高亮
+  selectedSegmentId.value = null;
   fileName.value = file.name;
   fileSize.value = file.size;
   try {
@@ -101,8 +161,13 @@ function onPick(event: Event): void {
 }
 
 function downloadJson(): void {
-  if (!canDownload.value || !result.value || !fileName.value) return;
-  const report = buildReport(fileName.value, fileSize.value, result.value.frames);
+  if (!canDownload.value || !result.value || !fileName.value || !alarms.value) return;
+  const report = buildReport(
+    fileName.value,
+    fileSize.value,
+    result.value.frames,
+    alarms.value,
+  );
   const blob = new Blob([JSON.stringify(report, null, 2)], {
     type: 'application/json',
   });
@@ -214,6 +279,61 @@ function downloadJson(): void {
       </template>
     </section>
 
+    <section v-if="result" id="alarms" class="alarms">
+      <h2>告警片段归并（高温 / 低温 / 低电量）</h2>
+      <p v-if="error" data-testid="alarms-skipped" class="continuity-skipped">
+        文件不合格，未分析告警片段：解析已在首个非法字节停止，
+        不会依据已保留的合法帧前缀生成任何片段。
+      </p>
+      <template v-else-if="alarms">
+        <p v-if="alarms.summary.totalSegments === 0" data-testid="alarms-empty" class="continuity-ok">
+          未发现任何告警：高温、低温、低电量三类标志在全部帧均为假，没有持续告警区间。
+        </p>
+        <template v-else>
+          <p data-testid="alarms-summary" class="continuity-gaps">
+            共 {{ alarms.summary.totalSegments }} 段持续告警：
+            高温 {{ alarms.summary.highTemp }} 段 ·
+            低温 {{ alarms.summary.lowTemp }} 段 ·
+            低电量 {{ alarms.summary.lowBattery }} 段。
+            点击下表片段可定位并高亮对应帧区间，再次点击取消定位；更换文件后定位自动清除。
+          </p>
+          <table id="alarm-segments">
+            <thead>
+              <tr>
+                <th>类型</th>
+                <th>起始帧 #</th>
+                <th>结束帧 #</th>
+                <th>帧数</th>
+                <th>起始字节偏移</th>
+                <th>结束字节偏移</th>
+                <th>起始时间戳（秒）</th>
+                <th>结束时间戳（秒）</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="s in alarms.segments"
+                :id="`alarm-segment-${segmentId(s)}`"
+                :key="segmentId(s)"
+                data-testid="alarm-row"
+                :class="['alarm-row', `alarm-${s.type}`, { selected: selectedSegmentId === segmentId(s) }]"
+                @click="selectSegment(segmentId(s))"
+              >
+                <td>{{ ALARM_LABELS[s.type] }}</td>
+                <td>{{ s.startFrameIndex }}</td>
+                <td>{{ s.endFrameIndex }}</td>
+                <td>{{ s.frameCount }}</td>
+                <td>{{ s.startOffset }}</td>
+                <td>{{ s.endOffset }}</td>
+                <td>{{ s.startTimestamp }}</td>
+                <td>{{ s.endTimestamp }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+      </template>
+    </section>
+
     <template v-if="result && frames.length">
       <section>
         <h2>帧概览（{{ frames.length }} 帧）</h2>
@@ -237,7 +357,8 @@ function downloadJson(): void {
             <tr
               v-for="f in frames"
               :key="f.index"
-              :class="{ 'gap-after': gapAfterIndexes.has(f.index) }"
+              :data-frame-index="f.index"
+              :class="frameRowClass(f)"
             >
               <td>
                 {{ f.index }}

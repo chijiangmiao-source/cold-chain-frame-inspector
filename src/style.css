@@ -124,6 +124,62 @@ tr.gap-after td {
   border-top: 2px solid #f59e0b;
 }
 
+.alarms {
+  border: 1px solid #2a3646;
+  background: #131b26;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin: 16px 0;
+}
+
+.alarms h2 {
+  margin: 0 0 8px;
+}
+
+.alarms p {
+  margin: 0 0 8px;
+}
+
+.alarm-row {
+  cursor: pointer;
+  user-select: none;
+}
+
+.alarm-row:hover td {
+  background: #1b2a40;
+}
+
+.alarm-row.selected td {
+  background: #243352;
+  outline: 1px solid #60a5fa;
+  outline-offset: -1px;
+}
+
+.alarm-row td:first-child {
+  border-left: 4px solid #475569;
+}
+
+.alarm-row.alarm-highTemp td:first-child {
+  border-left-color: #f87171;
+}
+
+.alarm-row.alarm-lowTemp td:first-child {
+  border-left-color: #60a5fa;
+}
+
+.alarm-row.alarm-lowBattery td:first-child {
+  border-left-color: #fbbf24;
+}
+
+tr.alarm-highlight td {
+  background: #173326;
+  box-shadow: inset 0 0 0 1px #34d399;
+}
+
+tr.alarm-highlight.gap-after td {
+  border-top: 2px solid #f59e0b;
+}
+
 .gap-flag {
   display: inline-block;
   margin-left: 6px;

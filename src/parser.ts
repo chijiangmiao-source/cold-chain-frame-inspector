@@ -267,12 +267,120 @@ export interface FrameReport {
   fields: FieldEntry[];
 }
 
+/** 告警类型，与帧标志位一一对应：高温 / 低温 / 低电量 */
+export const ALARM_TYPES = ['highTemp', 'lowTemp', 'lowBattery'] as const;
+export type AlarmType = (typeof ALARM_TYPES)[number];
+
+export interface AlarmSegment {
+  /** 告警类型：highTemp 高温、lowTemp 低温、lowBattery 低电量 */
+  type: AlarmType;
+  /** 片段起始帧号（包含） */
+  startFrameIndex: number;
+  /** 片段结束帧号（包含） */
+  endFrameIndex: number;
+  /** 起始帧首字节在文件中的绝对偏移 */
+  startOffset: number;
+  /** 结束帧末字节在文件中的绝对偏移（含），与起始偏移构成完整字节区间 */
+  endOffset: number;
+  /** 起始帧的小端秒时间戳 */
+  startTimestamp: number;
+  /** 结束帧的小端秒时间戳 */
+  endTimestamp: number;
+  /** 片段包含的帧数 */
+  frameCount: number;
+}
+
+export interface AlarmSummary {
+  /** 三类告警片段总数 */
+  totalSegments: number;
+  highTemp: number;
+  lowTemp: number;
+  lowBattery: number;
+}
+
+export interface AlarmResult {
+  summary: AlarmSummary;
+  /**
+   * 片段明细：按类型分组（高温、低温、低电量），组内按文件顺序排列。
+   * 三类标志各自独立归并，同一帧可同时出现在三类片段中（告警可重叠）。
+   */
+  segments: AlarmSegment[];
+}
+
+/**
+ * 对完全合法文件的帧按文件顺序分别归并三类告警标志。
+ *
+ * 某标志连续为真形成一个片段；遇到假值或文件结束即闭合。相邻两帧
+ * 即使标志都为真，只要 0-255 循环序号不连续（存在断点），也在断点
+ * 处切成两段，绝不跨序号断点合并；255 -> 0 的回绕视为连续。
+ * 仅在整文件解析成功（error === null）后调用，与连续性检查一致：
+ * 已保留的前置帧不得当作完整批次的告警结论。
+ */
+export function mergeAlarmSegments(frames: ParsedFrame[]): AlarmResult {
+  const segments: AlarmSegment[] = [];
+  const summary: AlarmSummary = {
+    totalSegments: 0,
+    highTemp: 0,
+    lowTemp: 0,
+    lowBattery: 0,
+  };
+
+  for (const type of ALARM_TYPES) {
+    let segStart: ParsedFrame | null = null;
+    let segEnd: ParsedFrame | null = null;
+
+    const push = (start: ParsedFrame, end: ParsedFrame): void => {
+      segments.push({
+        type,
+        startFrameIndex: start.index,
+        endFrameIndex: end.index,
+        startOffset: start.offset,
+        endOffset: end.offset + FRAME_SIZE - 1,
+        startTimestamp: start.timestamp,
+        endTimestamp: end.timestamp,
+        frameCount: end.index - start.index + 1,
+      });
+      summary[type] += 1;
+      summary.totalSegments += 1;
+    };
+
+    for (const frame of frames) {
+      if (frame.flags[type]) {
+        if (segStart !== null && segEnd !== null) {
+          const expectedSequence = (segEnd.sequence + 1) % 256;
+          if (frame.sequence !== expectedSequence) {
+            // 序号断点：先在前一帧闭合旧片段，再从当前帧开启新片段
+            push(segStart, segEnd);
+            segStart = frame;
+          }
+        } else {
+          // 此前为假值或片段刚开始：从当前帧开启
+          segStart = frame;
+        }
+        segEnd = frame;
+      } else if (segStart !== null) {
+        // 遇到假值：片段在上一帧（最后一个为真的帧）闭合
+        push(segStart, segEnd as ParsedFrame);
+        segStart = null;
+        segEnd = null;
+      }
+    }
+
+    // 文件结束：仍在延续的片段在末帧闭合
+    if (segStart !== null) push(segStart, segEnd as ParsedFrame);
+  }
+
+  return { summary, segments };
+}
+
 export interface FileReport {
   fileName: string;
   fileSize: number;
   frameCount: number;
   /** 连续性摘要与断点明细，与页面展示一致 */
   continuity: ContinuityResult;
+  /** 告警摘要与片段明细，与页面展示一致（仅整文件合法时生成） */
+  alarms: AlarmResult;
   frames: FrameReport[];
 }
 
@@ -281,12 +389,14 @@ export function buildReport(
   fileName: string,
   fileSize: number,
   frames: ParsedFrame[],
+  alarms: AlarmResult,
 ): FileReport {
   return {
     fileName,
     fileSize,
     frameCount: frames.length,
     continuity: checkSequenceContinuity(frames),
+    alarms,
     frames: frames.map((f) => ({
       index: f.index,
       offset: f.offset,

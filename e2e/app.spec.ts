@@ -327,3 +327,199 @@ test('坏文件：连续性区域显示未执行，保留帧不被误报为完�
   await expect(page.locator('#frames tbody tr.gap-after')).toHaveCount(0);
   await expect(page.locator('#download')).toHaveCount(0);
 });
+
+test('告警摘要与片段表：三类重叠告警按类型归并，断点处切段', async ({ page }) => {
+  await dropFile(page, 'alarms.bin', [
+    ...makeFrame({ flags: 0b111, seq: 0, timestamp: 1_700_000_000 }),
+    ...makeFrame({ flags: 0b111, seq: 1, timestamp: 1_700_000_060 }),
+    ...makeFrame({ flags: 0b000, seq: 2, timestamp: 1_700_000_120 }),
+    ...makeFrame({ flags: 0b111, seq: 4, timestamp: 1_700_000_180 }), // 序号断点 3 -> 4
+  ]);
+
+  // 摘要：每类各两段（[0,1] 与 [3,3]），共 6 段
+  await expect(page.getByTestId('alarms-summary')).toHaveText(
+    /共 6 段持续告警：\s*高温 2 段\s*·\s*低温 2 段\s*·\s*低电量 2 段/,
+  );
+  await expect(page.getByTestId('alarms-empty')).toHaveCount(0);
+  await expect(page.getByTestId('alarms-skipped')).toHaveCount(0);
+
+  const segRows = page.locator('#alarm-segments tbody tr');
+  await expect(segRows).toHaveCount(6);
+  // 顺序：高温两段、低温两段、低电量两段，组内按文件顺序
+  const expectRow = async (
+    n: number,
+    cells: string[],
+  ) => {
+    const tds = segRows.nth(n).locator('td');
+    for (const [i, text] of cells.entries()) {
+      await expect(tds.nth(i)).toHaveText(text);
+    }
+  };
+  // 高温 [0,1]：2 帧，字节区间 0..23，时间戳 1700000000..1700000060
+  await expectRow(0, ['高温', '0', '1', '2', '0', '23', '1700000000', '1700000060']);
+  // 高温 [3,3]：1 帧，字节区间 36..47
+  await expectRow(1, ['高温', '3', '3', '1', '36', '47', '1700000180', '1700000180']);
+  await expectRow(2, ['低温', '0', '1', '2', '0', '23', '1700000000', '1700000060']);
+  await expectRow(3, ['低温', '3', '3', '1', '36', '47', '1700000180', '1700000180']);
+  await expectRow(4, ['低电量', '0', '1', '2', '0', '23', '1700000000', '1700000060']);
+  await expectRow(5, ['低电量', '3', '3', '1', '36', '47', '1700000180', '1700000180']);
+});
+
+test('点击片段定位并高亮对应帧区间，再次点击取消', async ({ page }) => {
+  await dropFile(page, 'locate.bin', [
+    ...makeFrame({ flags: 0b001, seq: 0 }),
+    ...makeFrame({ flags: 0b001, seq: 1 }),
+    ...makeFrame({ flags: 0b000, seq: 2 }),
+    ...makeFrame({ flags: 0b001, seq: 3 }),
+  ]);
+
+  const segRows = page.locator('#alarm-segments tbody tr');
+  const frameRows = page.locator('#frames tbody tr');
+  await expect(segRows).toHaveCount(2);
+  await expect(page.locator('#frames tbody tr.alarm-highlight')).toHaveCount(0);
+
+  // 点击第一段（帧 0-1）：恰好这两帧高亮，片段行呈选中态
+  await segRows.nth(0).click();
+  await expect(segRows.nth(0)).toHaveClass(/selected/);
+  await expect(segRows.nth(1)).not.toHaveClass(/selected/);
+  await expect(frameRows.nth(0)).toHaveClass(/alarm-highlight/);
+  await expect(frameRows.nth(1)).toHaveClass(/alarm-highlight/);
+  await expect(frameRows.nth(2)).not.toHaveClass(/alarm-highlight/);
+  await expect(frameRows.nth(3)).not.toHaveClass(/alarm-highlight/);
+
+  // 改点第二段（帧 3）：高亮整体切换到帧 3
+  await segRows.nth(1).click();
+  await expect(segRows.nth(0)).not.toHaveClass(/selected/);
+  await expect(segRows.nth(1)).toHaveClass(/selected/);
+  await expect(frameRows.nth(0)).not.toHaveClass(/alarm-highlight/);
+  await expect(frameRows.nth(1)).not.toHaveClass(/alarm-highlight/);
+  await expect(frameRows.nth(3)).toHaveClass(/alarm-highlight/);
+
+  // 再次点击同一片段取消定位
+  await segRows.nth(1).click();
+  await expect(segRows.nth(1)).not.toHaveClass(/selected/);
+  await expect(page.locator('#frames tbody tr.alarm-highlight')).toHaveCount(0);
+});
+
+test('选择其他文件后清除片段定位与帧区间高亮', async ({ page }) => {
+  await dropFile(page, 'a.bin', [
+    ...makeFrame({ flags: 0b001, seq: 1 }),
+    ...makeFrame({ flags: 0b001, seq: 2 }),
+  ]);
+  await page.locator('#alarm-segments tbody tr').nth(0).click();
+  await expect(page.locator('#frames tbody tr.alarm-highlight')).toHaveCount(2);
+  await expect(page.locator('#alarm-segments tbody tr.selected')).toHaveCount(1);
+
+  // 换成同样有告警的另一文件：旧定位不得残留
+  await dropFile(page, 'b.bin', [
+    ...makeFrame({ flags: 0b100, seq: 7 }),
+  ]);
+  await expect(page.getByTestId('file-name')).toHaveText('b.bin');
+  await expect(page.locator('#alarm-segments tbody tr')).toHaveCount(1);
+  await expect(page.locator('#alarm-segments tbody tr.selected')).toHaveCount(0);
+  await expect(page.locator('#frames tbody tr.alarm-highlight')).toHaveCount(0);
+
+  // 再换成无告警文件：片段表消失，依旧无高亮
+  await dropFile(page, 'c.bin', [
+    ...makeFrame({ flags: 0b000, seq: 0 }),
+    ...makeFrame({ flags: 0b000, seq: 1 }),
+  ]);
+  await expect(page.getByTestId('alarms-empty')).toBeVisible();
+  await expect(page.locator('#alarm-segments')).toHaveCount(0);
+  await expect(page.locator('#frames tbody tr.alarm-highlight')).toHaveCount(0);
+});
+
+test('无告警时给出明确空态，下载 JSON 中摘要为零且片段为空', async ({ page }) => {
+  await dropFile(page, 'quiet.bin', [
+    ...makeFrame({ flags: 0b000, seq: 0 }),
+    ...makeFrame({ flags: 0b000, seq: 1 }),
+    ...makeFrame({ flags: 0b000, seq: 2 }),
+  ]);
+
+  await expect(page.getByTestId('alarms-empty')).toHaveText(/未发现任何告警/);
+  await expect(page.getByTestId('alarms-summary')).toHaveCount(0);
+  await expect(page.locator('#alarm-segments')).toHaveCount(0);
+
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.locator('#download').click(),
+  ]);
+  const report = JSON.parse(readFileSync((await download.path())!, 'utf8')) as {
+    alarms: {
+      summary: { totalSegments: number; highTemp: number; lowTemp: number; lowBattery: number };
+      segments: unknown[];
+    };
+  };
+  expect(report.alarms.summary).toEqual({
+    totalSegments: 0,
+    highTemp: 0,
+    lowTemp: 0,
+    lowBattery: 0,
+  });
+  expect(report.alarms.segments).toEqual([]);
+});
+
+test('坏文件：告警区域显示未分析，不依据保留前缀生成片段且禁止下载', async ({ page }) => {
+  await dropFile(page, 'bad.bin', [
+    ...makeFrame({ flags: 0b001, seq: 1 }), // 保留前缀本身带高温，但不得据此生成片段
+    ...makeFrame({ flags: 0b001, seq: 2 }),
+    ...makeFrame({ magic: [0x00, 0x00], flags: 0b001, seq: 3 }),
+  ]);
+
+  await expect(page.getByRole('alert')).toBeVisible();
+  await expect(page.getByTestId('alarms-skipped')).toHaveText(/文件不合格，未分析/);
+  await expect(page.getByTestId('alarms-summary')).toHaveCount(0);
+  await expect(page.getByTestId('alarms-empty')).toHaveCount(0);
+  await expect(page.locator('#alarm-segments')).toHaveCount(0);
+  await expect(page.locator('#frames tbody tr.alarm-highlight')).toHaveCount(0);
+  await expect(page.locator('#download')).toHaveCount(0);
+});
+
+test('下载 JSON 的告警摘要与片段明细和页面一致', async ({ page }) => {
+  await dropFile(page, 'alarms.bin', [
+    ...makeFrame({ flags: 0b111, seq: 0, timestamp: 1_700_000_000 }),
+    ...makeFrame({ flags: 0b111, seq: 1, timestamp: 1_700_000_060 }),
+    ...makeFrame({ flags: 0b000, seq: 2, timestamp: 1_700_000_120 }),
+    ...makeFrame({ flags: 0b111, seq: 4, timestamp: 1_700_000_180 }), // 序号断点
+  ]);
+
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.locator('#download').click(),
+  ]);
+  const report = JSON.parse(readFileSync((await download.path())!, 'utf8')) as {
+    alarms: {
+      summary: { totalSegments: number; highTemp: number; lowTemp: number; lowBattery: number };
+      segments: Array<{
+        type: string;
+        startFrameIndex: number;
+        endFrameIndex: number;
+        startOffset: number;
+        endOffset: number;
+        startTimestamp: number;
+        endTimestamp: number;
+        frameCount: number;
+      }>;
+    };
+  };
+
+  expect(report.alarms.summary).toEqual({
+    totalSegments: 6,
+    highTemp: 2,
+    lowTemp: 2,
+    lowBattery: 2,
+  });
+  expect(report.alarms.segments).toEqual([
+    { type: 'highTemp', startFrameIndex: 0, endFrameIndex: 1, startOffset: 0, endOffset: 23, startTimestamp: 1_700_000_000, endTimestamp: 1_700_000_060, frameCount: 2 },
+    { type: 'highTemp', startFrameIndex: 3, endFrameIndex: 3, startOffset: 36, endOffset: 47, startTimestamp: 1_700_000_180, endTimestamp: 1_700_000_180, frameCount: 1 },
+    { type: 'lowTemp', startFrameIndex: 0, endFrameIndex: 1, startOffset: 0, endOffset: 23, startTimestamp: 1_700_000_000, endTimestamp: 1_700_000_060, frameCount: 2 },
+    { type: 'lowTemp', startFrameIndex: 3, endFrameIndex: 3, startOffset: 36, endOffset: 47, startTimestamp: 1_700_000_180, endTimestamp: 1_700_000_180, frameCount: 1 },
+    { type: 'lowBattery', startFrameIndex: 0, endFrameIndex: 1, startOffset: 0, endOffset: 23, startTimestamp: 1_700_000_000, endTimestamp: 1_700_000_060, frameCount: 2 },
+    { type: 'lowBattery', startFrameIndex: 3, endFrameIndex: 3, startOffset: 36, endOffset: 47, startTimestamp: 1_700_000_180, endTimestamp: 1_700_000_180, frameCount: 1 },
+  ]);
+
+  // 页面片段表行数与下载明细一致
+  await expect(page.locator('#alarm-segments tbody tr')).toHaveCount(
+    report.alarms.segments.length,
+  );
+});
